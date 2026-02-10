@@ -5,7 +5,7 @@ import {
   PlatformAccessory,
   PlatformConfig,
 } from 'homebridge';
-import fetch from 'node-fetch';
+// Node 18+ has native fetch, no import needed
 import {
   PLATFORM_NAME,
   PLUGIN_NAME,
@@ -29,6 +29,7 @@ export class NanitPlatform implements DynamicPlatformPlugin {
   private tokenExpiry?: number;
   private refreshInterval?: NodeJS.Timeout;
   private discoveryInterval?: NodeJS.Timeout;
+  private rtmpPortCounter = 0;
 
   constructor(log: Logger, config: PlatformConfig, api: API) {
     this.log = log;
@@ -36,8 +37,18 @@ export class NanitPlatform implements DynamicPlatformPlugin {
     this.api = api;
 
     // Validate config
-    if (!this.config.email || !this.config.password) {
-      this.log.error('Email and password are required in config');
+    if (!this.config.email) {
+      this.log.error('Email is required in config');
+      return;
+    }
+
+    // Either password or refreshToken must be provided
+    const hasPassword = !!this.config.password;
+    const hasRefreshToken = !!(this.config as any).refreshToken;
+    
+    if (!hasPassword && !hasRefreshToken) {
+      this.log.error('Either password or refreshToken must be provided in config');
+      this.log.error('Use the nanit-auth CLI to get a refresh token: npx nanit-auth');
       return;
     }
 
@@ -75,7 +86,13 @@ export class NanitPlatform implements DynamicPlatformPlugin {
         }
       }
 
-      // Fresh login
+      // Fresh login (only if password is provided)
+      if (!this.config.password) {
+        this.log.error('No password provided and refresh token is invalid');
+        this.log.error('Please provide either a valid refreshToken or password in config');
+        throw new Error('Authentication failed: no valid credentials');
+      }
+
       this.log.info('Logging in to Nanit');
       const loginBody: any = {
         email: this.config.email,
@@ -265,5 +282,34 @@ export class NanitPlatform implements DynamicPlatformPlugin {
       throw new Error('Not authenticated');
     }
     return this.accessToken;
+  }
+
+  allocateRtmpPort(): number {
+    return (this.config.localRtmpPort || 1935) + this.rtmpPortCounter++;
+  }
+
+  // Platform shutdown cleanup
+  shutdown(): void {
+    this.log.info('Shutting down Nanit platform');
+    
+    // Clear intervals
+    if (this.refreshInterval) {
+      clearInterval(this.refreshInterval);
+      this.refreshInterval = undefined;
+    }
+    if (this.discoveryInterval) {
+      clearInterval(this.discoveryInterval);
+      this.discoveryInterval = undefined;
+    }
+    
+    // Cleanup all cameras
+    for (const camera of this.cameras.values()) {
+      if ((camera as any).destroy) {
+        (camera as any).destroy();
+      }
+    }
+    
+    this.cameras.clear();
+    this.log.info('Nanit platform shutdown complete');
   }
 }

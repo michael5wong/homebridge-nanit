@@ -10,8 +10,6 @@ import { NanitBaby } from './settings';
 import { NanitStreamingDelegate } from './streamingDelegate';
 import { LocalStreamingDelegate } from './localStreamingDelegate';
 
-let nextRtmpPort = 0; // auto-incremented per camera
-
 export class NanitCamera {
   private readonly api: API;
   private readonly hap: HAP;
@@ -23,6 +21,7 @@ export class NanitCamera {
   private cameraController?: any;
   private temperatureService?: Service;
   private humidityService?: Service;
+  private streamingDelegate?: NanitStreamingDelegate | LocalStreamingDelegate;
 
   constructor(platform: NanitPlatform, accessory: PlatformAccessory, baby: NanitBaby) {
     this.platform = platform;
@@ -49,20 +48,17 @@ export class NanitCamera {
 
   private setupCamera(): void {
     const streamMode = this.platform.config.streamMode || 'cloud';
-    const baseRtmpPort = this.platform.config.localRtmpPort || 1935;
-    const rtmpPort = baseRtmpPort + nextRtmpPort++;
+    const rtmpPort = this.platform.allocateRtmpPort();
     this.log.debug(`[${this.getName()}] Assigned RTMP port ${rtmpPort}`);
     // API returns private_address as "ip:port" — extract just the IP
     const privateAddr = this.baby.camera?.private_address;
     const localIp = this.baby.camera?.local_ip || (privateAddr ? privateAddr.split(':')[0] : undefined);
-    
-    let streamingDelegate;
 
     // Determine which streaming delegate to use
     const cameraUid = this.baby.camera?.uid || this.baby.camera_uid;
     if (streamMode === 'local' && localIp) {
       this.log.info(`[${this.getName()}] Using local streaming mode (${localIp})`);
-      streamingDelegate = new LocalStreamingDelegate(
+      this.streamingDelegate = new LocalStreamingDelegate(
         this.hap,
         this.log,
         this.baby.uid,
@@ -74,7 +70,7 @@ export class NanitCamera {
       );
     } else if (streamMode === 'auto' && localIp) {
       this.log.info(`[${this.getName()}] Using auto streaming mode (will try local first)`);
-      streamingDelegate = new LocalStreamingDelegate(
+      this.streamingDelegate = new LocalStreamingDelegate(
         this.hap,
         this.log,
         this.baby.uid,
@@ -91,7 +87,7 @@ export class NanitCamera {
       } else {
         this.log.info(`[${this.getName()}] Using cloud streaming mode`);
       }
-      streamingDelegate = new NanitStreamingDelegate(
+      this.streamingDelegate = new NanitStreamingDelegate(
         this.hap,
         this.log,
         this.getName(),
@@ -101,7 +97,7 @@ export class NanitCamera {
 
     const options = {
       cameraStreamCount: 2, // HomeKit requires at least 2 streams
-      delegate: streamingDelegate,
+      delegate: this.streamingDelegate,
       streamingOptions: {
         supportedCryptoSuites: [this.hap.SRTPCryptoSuites.AES_CM_128_HMAC_SHA1_80],
         video: {
@@ -128,7 +124,7 @@ export class NanitCamera {
     };
 
     this.cameraController = new this.hap.CameraController(options);
-    streamingDelegate.controller = this.cameraController;
+    this.streamingDelegate.controller = this.cameraController;
 
     this.accessory.configureController(this.cameraController);
   }
@@ -187,5 +183,14 @@ export class NanitCamera {
 
   public getBabyUid(): string {
     return this.baby.uid;
+  }
+
+  public destroy(): void {
+    this.log.debug(`[${this.getName()}] Cleaning up camera`);
+    
+    // Cleanup streaming delegate
+    if (this.streamingDelegate && (this.streamingDelegate as any).destroy) {
+      (this.streamingDelegate as any).destroy();
+    }
   }
 }

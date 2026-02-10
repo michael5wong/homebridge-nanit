@@ -185,7 +185,14 @@ export class NanitStreamingDelegate implements CameraStreamingDelegate {
       this.log.info(`[${this.name}] Stopping video stream`);
       const session = this.sessions.get(sessionId);
       if (session?.process) {
-        session.process.kill('SIGKILL');
+        // Graceful shutdown: SIGTERM first, then SIGKILL after 2s
+        session.process.kill('SIGTERM');
+        setTimeout(() => {
+          if (session.process && !session.process.killed) {
+            this.log.debug(`[${this.name}] FFmpeg didn't stop gracefully, forcing SIGKILL`);
+            session.process.kill('SIGKILL');
+          }
+        }, 2000);
       }
       this.sessions.delete(sessionId);
       callback();
@@ -193,5 +200,23 @@ export class NanitStreamingDelegate implements CameraStreamingDelegate {
       this.log.debug(`[${this.name}] Reconfigure stream (not implemented)`);
       callback();
     }
+  }
+
+  destroy(): void {
+    this.log.debug(`[${this.name}] Cleaning up streaming delegate`);
+    
+    // Stop all active sessions
+    for (const [sessionId, session] of this.sessions.entries()) {
+      if (session.process) {
+        session.process.kill('SIGTERM');
+        setTimeout(() => {
+          if (session.process && !session.process.killed) {
+            session.process.kill('SIGKILL');
+          }
+        }, 2000);
+      }
+    }
+    
+    this.sessions.clear();
   }
 }

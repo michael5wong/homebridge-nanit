@@ -21,8 +21,12 @@
       "password": {
         "title": "Password",
         "type": "string",
-        "required": true,
-        "description": "Your Nanit account password"
+        "description": "Your Nanit account password (optional if using refreshToken)"
+      },
+      "refreshToken": {
+        "title": "Refresh Token",
+        "type": "string",
+        "description": "Long-lived refresh token from nanit-auth CLI (recommended over password)"
       },
       "mfa_code": {
         "title": "MFA Code",
@@ -60,6 +64,7 @@
       "items": [
         "email",
         "password",
+        "refreshToken",
         "mfa_code",
         "refreshInterval",
         "streamMode",

@@ -374,9 +374,15 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
       const session = this.sessions.get(sessionId);
       
       if (session) {
-        // Stop ffmpeg
+        // Stop ffmpeg gracefully
         if (session.process) {
-          session.process.kill('SIGKILL');
+          session.process.kill('SIGTERM');
+          setTimeout(() => {
+            if (session.process && !session.process.killed) {
+              this.log.debug(`[${this.name}] FFmpeg didn't stop gracefully, forcing SIGKILL`);
+              session.process.kill('SIGKILL');
+            }
+          }, 2000);
         }
 
         // Stop streaming on camera
@@ -421,13 +427,19 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
   destroy(): void {
     this.log.debug(`[${this.name}] Cleaning up local streaming delegate`);
     
-    // Close all WebSocket connections
+    // Close all WebSocket connections and ffmpeg processes
     for (const [sessionId, session] of this.sessions) {
       if (session.ws && session.ws.readyState === WebSocket.OPEN) {
         session.ws.close();
       }
       if (session.process) {
-        session.process.kill('SIGKILL');
+        // Graceful shutdown: SIGTERM first, then SIGKILL after 2s
+        session.process.kill('SIGTERM');
+        setTimeout(() => {
+          if (session.process && !session.process.killed) {
+            session.process.kill('SIGKILL');
+          }
+        }, 2000);
       }
     }
     

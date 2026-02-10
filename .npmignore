@@ -1,0 +1,30 @@
+# Development files
+CODE_REVIEW.md
+proto/
+src/
+tsconfig.json
+jest.config.js
+
+# Git files
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test files
+test/
+tests/
+*.test.ts
+*.test.js
