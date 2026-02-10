@@ -1,0 +1,53 @@
+{
+  "pluginAlias": "NanitCamera",
+  "pluginType": "platform",
+  "singular": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "platform": {
+        "title": "Platform",
+        "type": "string",
+        "default": "NanitCamera",
+        "required": true
+      },
+      "email": {
+        "title": "Email",
+        "type": "string",
+        "required": true,
+        "format": "email",
+        "description": "Your Nanit account email address"
+      },
+      "password": {
+        "title": "Password",
+        "type": "string",
+        "required": true,
+        "description": "Your Nanit account password"
+      },
+      "mfa_code": {
+        "title": "MFA Code",
+        "type": "string",
+        "description": "Multi-factor authentication code (only needed for initial setup if MFA is enabled)"
+      },
+      "refreshInterval": {
+        "title": "Refresh Interval",
+        "type": "integer",
+        "default": 300,
+        "minimum": 60,
+        "description": "How often to refresh camera list and sensor data (in seconds)"
+      }
+    }
+  },
+  "layout": [
+    {
+      "type": "flex",
+      "flex-flow": "column",
+      "items": [
+        "email",
+        "password",
+        "mfa_code",
+        "refreshInterval"
+      ]
+    }
+  ]
+}

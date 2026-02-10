@@ -1,0 +1,38 @@
+{
+  "name": "homebridge-nanit",
+  "displayName": "Homebridge Nanit",
+  "version": "1.0.0",
+  "description": "Homebridge plugin for Nanit baby monitors - exposes cameras and sensors to HomeKit",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "nanit",
+    "baby monitor",
+    "camera"
+  ],
+  "engines": {
+    "node": "^18.17.0 || ^20.9.0 || ^22.0.0",
+    "homebridge": "^1.6.0 || ^2.0.0"
+  },
+  "author": "Michael Wong",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/michael5wong/homebridge-nanit.git"
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/node-fetch": "^2.6.11",
+    "homebridge": "^1.8.0",
+    "typescript": "^5.3.0"
+  }
+}

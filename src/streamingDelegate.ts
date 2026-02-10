@@ -1,0 +1,197 @@
+import {
+  CameraStreamingDelegate,
+  HAP,
+  PrepareStreamCallback,
+  PrepareStreamRequest,
+  PrepareStreamResponse,
+  SnapshotRequest,
+  SnapshotRequestCallback,
+  SRTPCryptoSuites,
+  StreamingRequest,
+  StreamRequestCallback,
+  StreamRequestTypes,
+  StreamSessionIdentifier,
+  Logger,
+} from 'homebridge';
+import { ChildProcess, spawn } from 'child_process';
+
+type SessionInfo = {
+  address: string; // iOS device address
+  videoPort: number;
+  videoReturnPort: number;
+  videoCryptoSuite: SRTPCryptoSuites;
+  videoSRTP: Buffer;
+  videoSSRC: number;
+
+  audioPort: number;
+  audioReturnPort: number;
+  audioCryptoSuite: SRTPCryptoSuites;
+  audioSRTP: Buffer;
+  audioSSRC: number;
+};
+
+export class NanitStreamingDelegate implements CameraStreamingDelegate {
+  private readonly hap: HAP;
+  private readonly log: Logger;
+  private readonly name: string;
+  private readonly getStreamUrl: () => string;
+  private readonly sessions: Map<string, { process?: ChildProcess }> = new Map();
+
+  controller?: any; // CameraController
+
+  constructor(hap: HAP, log: Logger, name: string, getStreamUrl: () => string) {
+    this.hap = hap;
+    this.log = log;
+    this.name = name;
+    this.getStreamUrl = getStreamUrl;
+  }
+
+  async handleSnapshotRequest(request: SnapshotRequest, callback: SnapshotRequestCallback): Promise<void> {
+    this.log.debug(`[${this.name}] Snapshot requested: ${request.width}x${request.height}`);
+    
+    const streamUrl = this.getStreamUrl();
+    const ffmpegArgs = [
+      '-i', streamUrl,
+      '-frames:v', '1',
+      '-f', 'image2',
+      '-',
+    ];
+
+    const ffmpeg = spawn('ffmpeg', ffmpegArgs, { env: process.env });
+    let imageBuffer = Buffer.alloc(0);
+
+    ffmpeg.stdout.on('data', (data) => {
+      imageBuffer = Buffer.concat([imageBuffer, data]);
+    });
+
+    ffmpeg.on('error', (error) => {
+      this.log.error(`[${this.name}] FFmpeg snapshot error:`, error.message);
+      callback(error);
+    });
+
+    ffmpeg.on('close', () => {
+      if (imageBuffer.length > 0) {
+        callback(undefined, imageBuffer);
+      } else {
+        callback(new Error('Failed to generate snapshot'));
+      }
+    });
+  }
+
+  async prepareStream(request: PrepareStreamRequest, callback: PrepareStreamCallback): Promise<void> {
+    this.log.debug(`[${this.name}] Prepare stream request`);
+
+    const sessionId = request.sessionID;
+    const targetAddress = request.targetAddress;
+
+    const videoReturn = request.video.port;
+    const videoSSRC = this.hap.CameraController.generateSynchronisationSource();
+    const audioReturn = request.audio.port;
+    const audioSSRC = this.hap.CameraController.generateSynchronisationSource();
+
+    const sessionInfo: SessionInfo = {
+      address: targetAddress,
+      videoPort: request.video.port,
+      videoReturnPort: videoReturn,
+      videoCryptoSuite: request.video.srtpCryptoSuite,
+      videoSRTP: Buffer.concat([request.video.srtp_key, request.video.srtp_salt]),
+      videoSSRC: videoSSRC,
+
+      audioPort: request.audio.port,
+      audioReturnPort: audioReturn,
+      audioCryptoSuite: request.audio.srtpCryptoSuite,
+      audioSRTP: Buffer.concat([request.audio.srtp_key, request.audio.srtp_salt]),
+      audioSSRC: audioSSRC,
+    };
+
+    const response: PrepareStreamResponse = {
+      video: {
+        port: videoReturn,
+        ssrc: videoSSRC,
+        srtp_key: request.video.srtp_key,
+        srtp_salt: request.video.srtp_salt,
+      },
+      audio: {
+        port: audioReturn,
+        ssrc: audioSSRC,
+        srtp_key: request.audio.srtp_key,
+        srtp_salt: request.audio.srtp_salt,
+      },
+    };
+
+    this.sessions.set(sessionId, { process: undefined });
+    callback(undefined, response);
+  }
+
+  async handleStreamRequest(request: StreamingRequest, callback: StreamRequestCallback): Promise<void> {
+    const sessionId = request.sessionID;
+
+    if (request.type === StreamRequestTypes.START) {
+      this.log.info(`[${this.name}] Starting video stream`);
+      
+      const streamUrl = this.getStreamUrl();
+      const session = this.sessions.get(sessionId);
+      
+      if (!session) {
+        this.log.error(`[${this.name}] No session found for ${sessionId}`);
+        callback(new Error('No session'));
+        return;
+      }
+
+      const video = request.video;
+      const target = (request as any).targetAddress;
+
+      const videoPort = (video as any).port || 0;
+      const ffmpegArgs = [
+        '-re',
+        '-i', streamUrl,
+        '-map', '0:v',
+        '-vcodec', 'libx264',
+        '-preset', 'ultrafast',
+        '-tune', 'zerolatency',
+        '-r', video.fps.toString(),
+        '-b:v', `${video.max_bit_rate}k`,
+        '-bufsize', `${video.max_bit_rate * 2}k`,
+        '-maxrate', `${video.max_bit_rate}k`,
+        '-pix_fmt', 'yuv420p',
+        '-f', 'rawvideo',
+        '-payload_type', video.pt.toString(),
+        `srtp://${target}:${videoPort}?rtcpport=${videoPort}&pkt_size=1316`,
+      ];
+
+      this.log.debug(`[${this.name}] FFmpeg args:`, ffmpegArgs.join(' '));
+
+      const ffmpeg = spawn('ffmpeg', ffmpegArgs, { env: process.env });
+      session.process = ffmpeg;
+
+      ffmpeg.stderr.on('data', (data) => {
+        // Only log errors, not all ffmpeg output
+        const message = data.toString();
+        if (message.includes('error') || message.includes('Error')) {
+          this.log.error(`[${this.name}] FFmpeg:`, message);
+        }
+      });
+
+      ffmpeg.on('error', (error) => {
+        this.log.error(`[${this.name}] FFmpeg process error:`, error.message);
+      });
+
+      ffmpeg.on('close', () => {
+        this.log.info(`[${this.name}] Video stream stopped`);
+      });
+
+      callback();
+    } else if (request.type === StreamRequestTypes.STOP) {
+      this.log.info(`[${this.name}] Stopping video stream`);
+      const session = this.sessions.get(sessionId);
+      if (session?.process) {
+        session.process.kill('SIGKILL');
+      }
+      this.sessions.delete(sessionId);
+      callback();
+    } else if (request.type === StreamRequestTypes.RECONFIGURE) {
+      this.log.debug(`[${this.name}] Reconfigure stream (not implemented)`);
+      callback();
+    }
+  }
+}
