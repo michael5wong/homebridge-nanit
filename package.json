@@ -7,12 +7,18 @@
   "bin": {
     "nanit-auth": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "config.schema.json",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
     "clean": "rm -rf dist",
-    "prepublishOnly": "npm run build",
-    "auth": "ts-node src/cli.ts"
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "homebridge-plugin",

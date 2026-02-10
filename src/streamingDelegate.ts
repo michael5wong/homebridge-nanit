@@ -10,8 +10,8 @@ import {
   StreamingRequest,
   StreamRequestCallback,
   StreamRequestTypes,
-  StreamSessionIdentifier,
   Logger,
+  CameraController,
 } from 'homebridge';
 import { ChildProcess, spawn } from 'child_process';
 
@@ -35,9 +35,9 @@ export class NanitStreamingDelegate implements CameraStreamingDelegate {
   private readonly log: Logger;
   private readonly name: string;
   private readonly getStreamUrl: () => string;
-  private readonly sessions: Map<string, { process?: ChildProcess }> = new Map();
+  private readonly sessions: Map<string, { process?: ChildProcess; info?: SessionInfo }> = new Map();
 
-  controller?: any; // CameraController
+  controller?: CameraController;
 
   constructor(hap: HAP, log: Logger, name: string, getStreamUrl: () => string) {
     this.hap = hap;
@@ -49,6 +49,14 @@ export class NanitStreamingDelegate implements CameraStreamingDelegate {
   async handleSnapshotRequest(request: SnapshotRequest, callback: SnapshotRequestCallback): Promise<void> {
     this.log.debug(`[${this.name}] Snapshot requested: ${request.width}x${request.height}`);
     
+    let callbackCalled = false;
+    const safeCallback = (error?: Error, buffer?: Buffer) => {
+      if (!callbackCalled) {
+        callbackCalled = true;
+        callback(error, buffer);
+      }
+    };
+
     const streamUrl = this.getStreamUrl();
     const ffmpegArgs = [
       '-i', streamUrl,
@@ -57,6 +65,7 @@ export class NanitStreamingDelegate implements CameraStreamingDelegate {
       '-',
     ];
 
+    this.log.debug(`[${this.name}] Snapshot URL: rtmps://media-secured.nanit.com/nanit/[baby_uid].[token_redacted]`);
     const ffmpeg = spawn('ffmpeg', ffmpegArgs, { env: process.env });
     let imageBuffer = Buffer.alloc(0);
 
@@ -66,14 +75,14 @@ export class NanitStreamingDelegate implements CameraStreamingDelegate {
 
     ffmpeg.on('error', (error) => {
       this.log.error(`[${this.name}] FFmpeg snapshot error:`, error.message);
-      callback(error);
+      safeCallback(error);
     });
 
     ffmpeg.on('close', () => {
       if (imageBuffer.length > 0) {
-        callback(undefined, imageBuffer);
+        safeCallback(undefined, imageBuffer);
       } else {
-        callback(new Error('Failed to generate snapshot'));
+        safeCallback(new Error('Failed to generate snapshot'));
       }
     });
   }
@@ -119,7 +128,7 @@ export class NanitStreamingDelegate implements CameraStreamingDelegate {
       },
     };
 
-    this.sessions.set(sessionId, { process: undefined });
+    this.sessions.set(sessionId, { process: undefined, info: sessionInfo });
     callback(undefined, response);
   }
 
@@ -132,16 +141,19 @@ export class NanitStreamingDelegate implements CameraStreamingDelegate {
       const streamUrl = this.getStreamUrl();
       const session = this.sessions.get(sessionId);
       
-      if (!session) {
-        this.log.error(`[${this.name}] No session found for ${sessionId}`);
-        callback(new Error('No session'));
+      if (!session || !session.info) {
+        this.log.error(`[${this.name}] No session info found for ${sessionId}`);
+        callback(new Error('No session info'));
         return;
       }
 
       const video = request.video;
-      const target = (request as any).targetAddress;
+      const info = session.info;
+      const target = info.address;
+      const videoPort = info.videoPort;
+      const videoSrtpKey = info.videoSRTP.toString('base64');
+      const videoSsrc = info.videoSSRC;
 
-      const videoPort = (video as any).port || 0;
       const ffmpegArgs = [
         '-re',
         '-i', streamUrl,
@@ -154,12 +166,16 @@ export class NanitStreamingDelegate implements CameraStreamingDelegate {
         '-bufsize', `${video.max_bit_rate * 2}k`,
         '-maxrate', `${video.max_bit_rate}k`,
         '-pix_fmt', 'yuv420p',
-        '-f', 'rawvideo',
+        '-an',
         '-payload_type', video.pt.toString(),
+        '-ssrc', videoSsrc.toString(),
+        '-f', 'rtp',
+        '-srtp_out_suite', 'AES_CM_128_HMAC_SHA1_80',
+        '-srtp_out_params', videoSrtpKey,
         `srtp://${target}:${videoPort}?rtcpport=${videoPort}&pkt_size=1316`,
       ];
 
-      this.log.debug(`[${this.name}] FFmpeg args:`, ffmpegArgs.join(' '));
+      this.log.debug(`[${this.name}] FFmpeg command starting (URL redacted for security)`);
 
       const ffmpeg = spawn('ffmpeg', ffmpegArgs, { env: process.env });
       session.process = ffmpeg;

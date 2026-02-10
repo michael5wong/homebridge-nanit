@@ -10,8 +10,8 @@ import {
   StreamingRequest,
   StreamRequestCallback,
   StreamRequestTypes,
-  StreamSessionIdentifier,
   Logger,
+  CameraController,
 } from 'homebridge';
 import { ChildProcess, spawn } from 'child_process';
 import WebSocket from 'ws';
@@ -47,10 +47,11 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
   private wsRequestId = 1;
   private startingSessions: Set<string> = new Set();
 
-  controller?: any; // CameraController
+  controller?: CameraController;
 
   private readonly cameraUid: string;
   private readonly babyUid: string;
+  private readonly configuredLocalAddress?: string;
 
   constructor(
     hap: HAP,
@@ -61,6 +62,7 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
     rtmpPort: number = 1935,
     cameraUid?: string,
     babyUid?: string,
+    configuredLocalAddress?: string,
   ) {
     this.hap = hap;
     this.log = log;
@@ -70,6 +72,7 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
     this.rtmpPort = rtmpPort;
     this.cameraUid = cameraUid || '';
     this.babyUid = babyUid || '';
+    this.configuredLocalAddress = configuredLocalAddress;
   }
 
   private startRtmpServer(): void {
@@ -97,8 +100,11 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
   }
 
   private stopRtmpServer(): void {
-    // NodeMediaServer v4 has no stop() method — keep server running
-    // It will be reused for subsequent stream requests
+    // NodeMediaServer v4 removed the stop() method from v3
+    // Server lifecycle: shared across all sessions, stopped only on plugin shutdown
+    // This is intentional — RTMP server stays running and reuses connections
+    // Alternative would be to track active sessions and stop when count hits zero,
+    // but the overhead of keeping the server running is negligible
     this.log.debug(`[${this.name}] RTMP server kept alive for reuse`);
   }
 
@@ -151,6 +157,12 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
   }
 
   private getHostIp(): string {
+    // Use configured local address if provided
+    if (this.configuredLocalAddress) {
+      return this.configuredLocalAddress;
+    }
+    
+    // Auto-detect from network interfaces
     const interfaces = os.networkInterfaces();
     for (const name of Object.keys(interfaces)) {
       for (const iface of interfaces[name] || []) {
@@ -189,8 +201,16 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
   async handleSnapshotRequest(request: SnapshotRequest, callback: SnapshotRequestCallback): Promise<void> {
     this.log.debug(`[${this.name}] Snapshot requested: ${request.width}x${request.height}`);
     
+    let callbackCalled = false;
+    const safeCallback = (error?: Error, buffer?: Buffer) => {
+      if (!callbackCalled) {
+        callbackCalled = true;
+        callback(error, buffer);
+      }
+    };
+
     // For snapshots, we'll use the cloud URL as a fallback since local RTMP might not be running
-    const cloudUrl = `rtmps://media-secured.nanit.com/nanit/${this.name}.${this.getAccessToken()}`;
+    const cloudUrl = `rtmps://media-secured.nanit.com/nanit/${this.babyUid}.${this.getAccessToken()}`;
     const ffmpegArgs = [
       '-i', cloudUrl,
       '-frames:v', '1',
@@ -198,6 +218,7 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
       '-',
     ];
 
+    this.log.debug(`[${this.name}] Snapshot URL: rtmps://media-secured.nanit.com/nanit/[baby_uid].[token_redacted]`);
     const ffmpeg = spawn('ffmpeg', ffmpegArgs, { env: process.env });
     let imageBuffer = Buffer.alloc(0);
 
@@ -207,14 +228,14 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
 
     ffmpeg.on('error', (error) => {
       this.log.error(`[${this.name}] FFmpeg snapshot error:`, error.message);
-      callback(error);
+      safeCallback(error);
     });
 
     ffmpeg.on('close', () => {
       if (imageBuffer.length > 0) {
-        callback(undefined, imageBuffer);
+        safeCallback(undefined, imageBuffer);
       } else {
-        callback(new Error('Failed to generate snapshot'));
+        safeCallback(new Error('Failed to generate snapshot'));
       }
     });
   }
@@ -343,7 +364,7 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
           `srtp://${target}:${videoPort}?rtcpport=${videoPort}&pkt_size=1316`,
         ];
 
-        this.log.debug(`[${this.name}] FFmpeg args:`, ffmpegArgs.join(' '));
+        this.log.debug(`[${this.name}] FFmpeg command starting (SRTP params redacted for security)`);
 
         const ffmpeg = spawn('ffmpeg', ffmpegArgs, { env: process.env });
         session.process = ffmpeg;

@@ -53,12 +53,22 @@ This will:
 
 Add this to your Homebridge `config.json` under `platforms`:
 
+**Recommended (refresh token only):**
 ```json
 {
     "platform": "NanitCamera",
     "email": "your@email.com",
-    "password": "your-nanit-password",
     "refreshToken": "your-refresh-token-from-step-1"
+}
+```
+
+**Alternative (with password as backup):**
+```json
+{
+    "platform": "NanitCamera",
+    "email": "your@email.com",
+    "refreshToken": "your-refresh-token-from-step-1",
+    "password": "your-nanit-password"
 }
 ```
 
@@ -68,10 +78,10 @@ Add this to your Homebridge `config.json` under `platforms`:
 {
     "platform": "NanitCamera",
     "email": "your@email.com",
-    "password": "your-nanit-password",
     "refreshToken": "your-refresh-token",
     "streamMode": "auto",
-    "localRtmpPort": 1935
+    "localRtmpPort": 1935,
+    "localAddress": "192.168.1.100"
 }
 ```
 
@@ -79,6 +89,7 @@ Add this to your Homebridge `config.json` under `platforms`:
 |---------|---------|-------------|
 | `streamMode` | `"cloud"` | `"cloud"`, `"local"`, or `"auto"` (tries local first) |
 | `localRtmpPort` | `1935` | Base RTMP port for local streaming (each camera gets its own port starting here) |
+| `localAddress` | Auto-detect | Optional: Override the automatically detected host IP for local streaming |
 
 ## Streaming Modes
 

@@ -26,7 +26,6 @@ export class NanitPlatform implements DynamicPlatformPlugin {
 
   private accessToken?: string;
   private refreshToken?: string;
-  private tokenExpiry?: number;
   private refreshInterval?: NodeJS.Timeout;
   private discoveryInterval?: NodeJS.Timeout;
   private rtmpPortCounter = 0;
@@ -44,7 +43,7 @@ export class NanitPlatform implements DynamicPlatformPlugin {
 
     // Either password or refreshToken must be provided
     const hasPassword = !!this.config.password;
-    const hasRefreshToken = !!(this.config as any).refreshToken;
+    const hasRefreshToken = !!this.config.refreshToken;
     
     if (!hasPassword && !hasRefreshToken) {
       this.log.error('Either password or refreshToken must be provided in config');
@@ -53,6 +52,9 @@ export class NanitPlatform implements DynamicPlatformPlugin {
     }
 
     this.log.info('Initializing Nanit platform');
+
+    // Wire shutdown event
+    this.api.on('shutdown', () => this.shutdown());
 
     // Wait for homebridge to finish loading
     this.api.on('didFinishLaunching', () => {
@@ -72,7 +74,7 @@ export class NanitPlatform implements DynamicPlatformPlugin {
   async authenticate(): Promise<void> {
     try {
       // Try refresh token from config first, then storage
-      const configRefreshToken = (this.config as any).refreshToken;
+      const configRefreshToken = this.config.refreshToken;
       const storage = this.api.hap.HAPStorage.storage();
       const storedToken = configRefreshToken || storage.getItemSync(`nanit_refresh_${this.config.email}`);
       
@@ -104,6 +106,9 @@ export class NanitPlatform implements DynamicPlatformPlugin {
         loginBody.mfa_code = this.config.mfa_code;
       }
 
+      const abortController = new AbortController();
+      const timeoutId = setTimeout(() => abortController.abort(), 15000);
+      
       const response = await fetch('https://api.nanit.com/login', {
         method: 'POST',
         headers: {
@@ -111,13 +116,12 @@ export class NanitPlatform implements DynamicPlatformPlugin {
           'nanit-api-version': '1',
         },
         body: JSON.stringify(loginBody),
-      });
+        signal: abortController.signal,
+      }).finally(() => clearTimeout(timeoutId));
 
       if (response.status === 482) {
         // MFA required
-        const data = await response.json() as any;
-        this.log.error('MFA required. Please add "mfa_code" to your config and restart Homebridge.');
-        this.log.error('MFA token:', data.mfa_token);
+        this.log.error('MFA required. Please run "npx nanit-auth" to authenticate with MFA and get a refresh token.');
         throw new Error('MFA required');
       }
 
@@ -129,7 +133,6 @@ export class NanitPlatform implements DynamicPlatformPlugin {
       const data = await response.json() as NanitAuthResponse;
       this.accessToken = data.access_token;
       this.refreshToken = data.refresh_token;
-      this.tokenExpiry = Date.now() + 50 * 60 * 1000; // 50 minutes
 
       // Store refresh token
       if (this.refreshToken) {
@@ -151,6 +154,9 @@ export class NanitPlatform implements DynamicPlatformPlugin {
     }
 
     this.log.debug('Refreshing access token');
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), 15000);
+    
     const response = await fetch('https://api.nanit.com/tokens/refresh', {
       method: 'POST',
       headers: {
@@ -158,7 +164,8 @@ export class NanitPlatform implements DynamicPlatformPlugin {
         'nanit-api-version': '1',
       },
       body: JSON.stringify({ refresh_token: refreshToken }),
-    });
+      signal: abortController.signal,
+    }).finally(() => clearTimeout(timeoutId));
 
     if (!response.ok) {
       const text = await response.text();
@@ -168,7 +175,6 @@ export class NanitPlatform implements DynamicPlatformPlugin {
     const data = await response.json() as NanitAuthResponse;
     this.accessToken = data.access_token;
     this.refreshToken = data.refresh_token;
-    this.tokenExpiry = Date.now() + 50 * 60 * 1000; // 50 minutes
 
     // Store new refresh token
     if (this.refreshToken) {
@@ -186,12 +192,16 @@ export class NanitPlatform implements DynamicPlatformPlugin {
       }
 
       this.log.info('Discovering cameras');
+      const abortController = new AbortController();
+      const timeoutId = setTimeout(() => abortController.abort(), 15000);
+      
       const response = await fetch('https://api.nanit.com/babies', {
         headers: {
           'Authorization': this.accessToken,
           'nanit-api-version': '1',
         },
-      });
+        signal: abortController.signal,
+      }).finally(() => clearTimeout(timeoutId));
 
       if (!response.ok) {
         throw new Error(`Failed to get babies: ${response.status}`);
@@ -205,13 +215,21 @@ export class NanitPlatform implements DynamicPlatformPlugin {
       }
 
       // Remove cameras that no longer exist
+      const accessoriesToRemove: PlatformAccessory[] = [];
       for (const accessory of this.accessories) {
         const exists = data.babies.some(b => b.uid === accessory.context.babyUid);
         if (!exists) {
           this.log.info('Removing camera:', accessory.displayName);
-          this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+          accessoriesToRemove.push(accessory);
           this.cameras.delete(accessory.context.babyUid);
         }
+      }
+      
+      if (accessoriesToRemove.length > 0) {
+        this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, accessoriesToRemove);
+        // Filter removed accessories from the array
+        this.accessories.splice(0, this.accessories.length, 
+          ...this.accessories.filter(acc => !accessoriesToRemove.includes(acc)));
       }
     } catch (error) {
       this.log.error('Failed to discover cameras:', error);

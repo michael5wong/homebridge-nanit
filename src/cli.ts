@@ -9,9 +9,47 @@ const rl = readline.createInterface({
   output: process.stdout,
 });
 
-function ask(question: string): Promise<string> {
+function ask(question: string, hidden = false): Promise<string> {
   return new Promise((resolve) => {
-    rl.question(question, (answer) => resolve(answer.trim()));
+    if (hidden) {
+      // Hide input for passwords
+      process.stdout.write(question);
+      const stdin = process.stdin;
+      stdin.setRawMode(true);
+      stdin.resume();
+      stdin.setEncoding('utf8');
+      
+      let password = '';
+      const onData = (char: string) => {
+        char = char.toString();
+        
+        if (char === '\n' || char === '\r' || char === '\u0004') {
+          // Enter or Ctrl+D
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.removeListener('data', onData);
+          process.stdout.write('\n');
+          resolve(password);
+        } else if (char === '\u0003') {
+          // Ctrl+C
+          process.exit(1);
+        } else if (char === '\u007f' || char === '\b') {
+          // Backspace
+          if (password.length > 0) {
+            password = password.slice(0, -1);
+            process.stdout.write('\b \b');
+          }
+        } else {
+          // Regular character
+          password += char;
+          process.stdout.write('*');
+        }
+      };
+      
+      stdin.on('data', onData);
+    } else {
+      rl.question(question, (answer) => resolve(answer.trim()));
+    }
   });
 }
 
@@ -21,10 +59,13 @@ async function main() {
   console.log('for your Homebridge config.\n');
 
   const email = await ask('Nanit email: ');
-  const password = await ask('Nanit password: ');
+  const password = await ask('Nanit password: ', true);
 
   console.log('\nLogging in...');
 
+  const abortController1 = new AbortController();
+  const timeoutId1 = setTimeout(() => abortController1.abort(), 15000);
+  
   const loginResponse = await fetch(`${API_BASE}/login`, {
     method: 'POST',
     headers: {
@@ -32,7 +73,8 @@ async function main() {
       'nanit-api-version': '1',
     },
     body: JSON.stringify({ email, password }),
-  });
+    signal: abortController1.signal,
+  }).finally(() => clearTimeout(timeoutId1));
 
   if (loginResponse.ok) {
     // No MFA required
@@ -52,6 +94,9 @@ async function main() {
 
     console.log('Verifying...');
 
+    const abortController2 = new AbortController();
+    const timeoutId2 = setTimeout(() => abortController2.abort(), 15000);
+    
     const mfaResponse = await fetch(`${API_BASE}/login`, {
       method: 'POST',
       headers: {
@@ -64,7 +109,8 @@ async function main() {
         mfa_token: mfaData.mfa_token,
         mfa_code: mfaCode,
       }),
-    });
+      signal: abortController2.signal,
+    }).finally(() => clearTimeout(timeoutId2));
 
     if (mfaResponse.ok) {
       const data = await mfaResponse.json() as any;

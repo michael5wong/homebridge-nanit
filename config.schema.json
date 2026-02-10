@@ -8,13 +8,11 @@
       "platform": {
         "title": "Platform",
         "type": "string",
-        "default": "NanitCamera",
-        "required": true
+        "default": "NanitCamera"
       },
       "email": {
         "title": "Email",
         "type": "string",
-        "required": true,
         "format": "email",
         "description": "Your Nanit account email address"
       },
@@ -54,8 +52,14 @@
         "minimum": 1024,
         "maximum": 65535,
         "description": "Port for local RTMP server (only used for local/auto modes)"
+      },
+      "localAddress": {
+        "title": "Local Address",
+        "type": "string",
+        "description": "Optional: Override the automatically detected host IP for local streaming"
       }
-    }
+    },
+    "required": ["platform", "email"]
   },
   "layout": [
     {

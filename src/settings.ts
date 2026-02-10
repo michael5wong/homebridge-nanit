@@ -14,11 +14,13 @@ export const PLUGIN_NAME = 'homebridge-nanit';
 export interface NanitPlatformConfig {
   platform: string;
   email: string;
-  password: string;
+  password?: string;
+  refreshToken?: string;
   mfa_code?: string;
   refreshInterval?: number; // seconds between baby list refresh (default: 300)
   streamMode?: 'cloud' | 'local' | 'auto'; // streaming mode (default: 'cloud')
   localRtmpPort?: number; // local RTMP server port (default: 1935)
+  localAddress?: string; // optional host IP override for local streaming
 }
 
 /**

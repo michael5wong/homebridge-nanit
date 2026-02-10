@@ -4,6 +4,7 @@ import {
   Logger,
   PlatformAccessory,
   Service,
+  CameraController,
 } from 'homebridge';
 import { NanitPlatform } from './platform';
 import { NanitBaby } from './settings';
@@ -18,7 +19,7 @@ export class NanitCamera {
   private readonly accessory: PlatformAccessory;
   private readonly baby: NanitBaby;
 
-  private cameraController?: any;
+  private cameraController?: CameraController;
   private temperatureService?: Service;
   private humidityService?: Service;
   private streamingDelegate?: NanitStreamingDelegate | LocalStreamingDelegate;
@@ -56,7 +57,9 @@ export class NanitCamera {
 
     // Determine which streaming delegate to use
     const cameraUid = this.baby.camera?.uid || this.baby.camera_uid;
-    if (streamMode === 'local' && localIp) {
+    const hasValidCameraUid = cameraUid && cameraUid.length > 0;
+    
+    if (streamMode === 'local' && localIp && hasValidCameraUid) {
       this.log.info(`[${this.getName()}] Using local streaming mode (${localIp})`);
       this.streamingDelegate = new LocalStreamingDelegate(
         this.hap,
@@ -67,8 +70,9 @@ export class NanitCamera {
         rtmpPort,
         cameraUid,
         this.baby.uid,
+        this.platform.config.localAddress,
       );
-    } else if (streamMode === 'auto' && localIp) {
+    } else if (streamMode === 'auto' && localIp && hasValidCameraUid) {
       this.log.info(`[${this.getName()}] Using auto streaming mode (will try local first)`);
       this.streamingDelegate = new LocalStreamingDelegate(
         this.hap,
@@ -79,11 +83,18 @@ export class NanitCamera {
         rtmpPort,
         cameraUid,
         this.baby.uid,
+        this.platform.config.localAddress,
       );
     } else {
       // Default to cloud streaming
       if (streamMode !== 'cloud') {
-        this.log.warn(`[${this.getName()}] Local IP not available or invalid mode, falling back to cloud streaming`);
+        if (!hasValidCameraUid) {
+          this.log.warn(`[${this.getName()}] Camera UID not available, falling back to cloud streaming`);
+        } else if (!localIp) {
+          this.log.warn(`[${this.getName()}] Local IP not available, falling back to cloud streaming`);
+        } else {
+          this.log.warn(`[${this.getName()}] Invalid mode, falling back to cloud streaming`);
+        }
       } else {
         this.log.info(`[${this.getName()}] Using cloud streaming mode`);
       }
