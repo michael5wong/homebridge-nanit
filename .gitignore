@@ -23,6 +23,9 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
-# Environment
+# Environment / secrets
 .env
 .env.local
+
+# Package tarballs
+*.tgz

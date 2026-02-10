@@ -8,6 +8,9 @@ import {
 import { NanitPlatform } from './platform';
 import { NanitBaby } from './settings';
 import { NanitStreamingDelegate } from './streamingDelegate';
+import { LocalStreamingDelegate } from './localStreamingDelegate';
+
+let nextRtmpPort = 0; // auto-incremented per camera
 
 export class NanitCamera {
   private readonly api: API;
@@ -45,12 +48,56 @@ export class NanitCamera {
   }
 
   private setupCamera(): void {
-    const streamingDelegate = new NanitStreamingDelegate(
-      this.hap,
-      this.log,
-      this.getName(),
-      () => this.getStreamUrl(),
-    );
+    const streamMode = this.platform.config.streamMode || 'cloud';
+    const baseRtmpPort = this.platform.config.localRtmpPort || 1935;
+    const rtmpPort = baseRtmpPort + nextRtmpPort++;
+    this.log.debug(`[${this.getName()}] Assigned RTMP port ${rtmpPort}`);
+    // API returns private_address as "ip:port" — extract just the IP
+    const privateAddr = this.baby.camera?.private_address;
+    const localIp = this.baby.camera?.local_ip || (privateAddr ? privateAddr.split(':')[0] : undefined);
+    
+    let streamingDelegate;
+
+    // Determine which streaming delegate to use
+    const cameraUid = this.baby.camera?.uid || this.baby.camera_uid;
+    if (streamMode === 'local' && localIp) {
+      this.log.info(`[${this.getName()}] Using local streaming mode (${localIp})`);
+      streamingDelegate = new LocalStreamingDelegate(
+        this.hap,
+        this.log,
+        this.baby.uid,
+        localIp,
+        () => this.platform.getAccessToken(),
+        rtmpPort,
+        cameraUid,
+        this.baby.uid,
+      );
+    } else if (streamMode === 'auto' && localIp) {
+      this.log.info(`[${this.getName()}] Using auto streaming mode (will try local first)`);
+      streamingDelegate = new LocalStreamingDelegate(
+        this.hap,
+        this.log,
+        this.baby.uid,
+        localIp,
+        () => this.platform.getAccessToken(),
+        rtmpPort,
+        cameraUid,
+        this.baby.uid,
+      );
+    } else {
+      // Default to cloud streaming
+      if (streamMode !== 'cloud') {
+        this.log.warn(`[${this.getName()}] Local IP not available or invalid mode, falling back to cloud streaming`);
+      } else {
+        this.log.info(`[${this.getName()}] Using cloud streaming mode`);
+      }
+      streamingDelegate = new NanitStreamingDelegate(
+        this.hap,
+        this.log,
+        this.getName(),
+        () => this.getStreamUrl(),
+      );
+    }
 
     const options = {
       cameraStreamCount: 2, // HomeKit requires at least 2 streams
@@ -130,7 +177,7 @@ export class NanitCamera {
   }
 
   private getName(): string {
-    return `${this.baby.first_name}${this.baby.last_name ? ' ' + this.baby.last_name : ''}`;
+    return this.baby.name || this.baby.first_name || 'Nanit Camera';
   }
 
   private getStreamUrl(): string {

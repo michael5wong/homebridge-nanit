@@ -1,90 +1,129 @@
-# homebridge-nanit
+# Homebridge Nanit
 
-Homebridge plugin for Nanit baby monitors - exposes cameras and sensors to HomeKit.
+[![npm](https://img.shields.io/npm/v/homebridge-nanit)](https://www.npmjs.com/package/homebridge-nanit)
+[![license](https://img.shields.io/npm/l/homebridge-nanit)](LICENSE)
+
+A [Homebridge](https://homebridge.io) plugin that exposes [Nanit](https://www.nanit.com) baby monitors as HomeKit cameras with live streaming, temperature, and humidity sensors.
 
 ## Features
 
-- **Live video streaming** via RTMPS
-- **Temperature sensor** (if available)
-- **Humidity sensor** (if available)
-- Automatic token refresh
-- Multiple camera support
+- 📹 **Live video streaming** via HomeKit (Home app, Control Center)
+- 🌡️ **Temperature sensor** — ambient room temperature from the Nanit
+- 💧 **Humidity sensor** — ambient humidity from the Nanit
+- 🏠 **Local streaming** — stream directly from camera over LAN (lower latency)
+- ☁️ **Cloud streaming** — fallback via Nanit's RTMPS servers
+- 🔄 **Auto mode** — tries local first, falls back to cloud
+- 🔐 **Token auto-refresh** — handles Nanit's rotating refresh tokens
 
 ## Requirements
 
-- **Homebridge** v1.6.0 or higher
-- **ffmpeg** - Required for video streaming (install via `brew install ffmpeg` on macOS)
-- Node.js v18.17.0 or higher
+- Homebridge 1.6+ or 2.0+
+- Node.js 18+
+- Nanit camera (Gen 2+ recommended)
+- `ffmpeg` installed on your Homebridge host
 
 ## Installation
+
+### Via Homebridge UI
+
+Search for `homebridge-nanit` in the Homebridge plugin search.
+
+### Via CLI
 
 ```bash
 sudo npm install -g homebridge-nanit
 ```
 
-Or install from local directory:
+## Setup
+
+### 1. Get Your Refresh Token
+
+Nanit requires MFA (multi-factor authentication). Run the included auth helper to get a refresh token:
 
 ```bash
-sudo npm install -g ~/Projects/homebridge-nanit/
+npx nanit-auth
 ```
 
-## Configuration
+This will:
+1. Ask for your Nanit email and password
+2. Send an MFA code to your phone
+3. Output a `refreshToken` to add to your config
 
-Add to your Homebridge `config.json`:
+### 2. Configure the Plugin
+
+Add this to your Homebridge `config.json` under `platforms`:
 
 ```json
 {
-  "platforms": [
-    {
-      "platform": "NanitCamera",
-      "email": "your-nanit-email@example.com",
-      "password": "your-nanit-password",
-      "refreshInterval": 300
-    }
-  ]
+    "platform": "NanitCamera",
+    "email": "your@email.com",
+    "password": "your-nanit-password",
+    "refreshToken": "your-refresh-token-from-step-1"
 }
 ```
 
-### Configuration Options
+### Optional Settings
 
-- **email** (required): Your Nanit account email
-- **password** (required): Your Nanit account password
-- **mfa_code** (optional): MFA code if your account has multi-factor authentication enabled (only needed for first setup)
-- **refreshInterval** (optional): How often to refresh camera list and sensor data in seconds (default: 300)
-
-### MFA Setup
-
-If your Nanit account has MFA enabled:
-
-1. On first run, the plugin will fail and log an MFA token
-2. Add `"mfa_code": "your-code"` to your config
-3. Restart Homebridge
-4. After successful authentication, you can remove the MFA code from config
-
-The plugin will store a refresh token and won't require MFA on subsequent restarts.
-
-## Development
-
-```bash
-# Install dependencies
-npm install
-
-# Build
-npm run build
-
-# Watch for changes
-npm run watch
-
-# Clean build artifacts
-npm run clean
+```json
+{
+    "platform": "NanitCamera",
+    "email": "your@email.com",
+    "password": "your-nanit-password",
+    "refreshToken": "your-refresh-token",
+    "streamMode": "auto",
+    "localRtmpPort": 1935
+}
 ```
 
-## API Details
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `streamMode` | `"cloud"` | `"cloud"`, `"local"`, or `"auto"` (tries local first) |
+| `localRtmpPort` | `1935` | Base RTMP port for local streaming (each camera gets its own port starting here) |
 
-This plugin uses the Nanit REST API:
-- Authentication endpoint: `https://api.nanit.com/login`
-- Babies/cameras endpoint: `https://api.nanit.com/babies`
-- Streaming: RTMPS via `rtmps://media-secured.nanit.com/nanit/{baby_uid}.{access_token}`
+## Streaming Modes
+
+### Cloud (default)
+Streams via Nanit's RTMPS servers. Works everywhere, slightly higher latency.
+
+### Local
+Streams directly from the camera over your LAN via WebSocket signaling + RTMP. Lower latency, but requires the camera and Homebridge to be on the same network.
+
+### Auto (recommended)
+Tries local streaming first. If the camera's local IP isn't available, falls back to cloud.
+
+## How It Works
+
+1. **Authentication**: Uses Nanit's REST API with email/password + refresh token (handles MFA)
+2. **Camera Discovery**: Queries the `/babies` API endpoint to find cameras
+3. **Cloud Streaming**: Connects to `rtmps://media-secured.nanit.com` with auth token
+4. **Local Streaming**: 
+   - Starts a local RTMP server on the Homebridge host
+   - Connects to the camera via WebSocket (signaling)
+   - Camera pushes RTMP stream directly to Homebridge
+   - ffmpeg transcodes to HomeKit-compatible SRTP
+
+## Troubleshooting
+
+### "MFA required" on startup
+Run `npx nanit-auth` to get a fresh refresh token and update your config.
+
+### Camera shows but no video
+- Check that `ffmpeg` is installed: `ffmpeg -version`
+- Check Homebridge logs for ffmpeg errors
+- Try `"streamMode": "cloud"` if local streaming has issues
+
+### "USER_LOGGED_OUT" in logs
+Your refresh token has expired. Run `npx nanit-auth` again to get a new one.
+
+### Local streaming not working
+- Ensure camera and Homebridge are on the same network/subnet
+- Check that the RTMP port (default 1935) isn't blocked by a firewall
+- Port 442 (camera WebSocket) must be reachable from Homebridge
+
+## Credits
+
+- Protocol reference: [gregory-m/nanit](https://github.com/gregory-m/nanit) (Go implementation)
+- Built with [Homebridge](https://homebridge.io)
 
 ## License
 

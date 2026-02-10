@@ -60,9 +60,10 @@ export class NanitPlatform implements DynamicPlatformPlugin {
 
   async authenticate(): Promise<void> {
     try {
-      // Try to load refresh token from storage
+      // Try refresh token from config first, then storage
+      const configRefreshToken = (this.config as any).refreshToken;
       const storage = this.api.hap.HAPStorage.storage();
-      const storedToken = storage.getItemSync(`nanit_refresh_${this.config.email}`);
+      const storedToken = configRefreshToken || storage.getItemSync(`nanit_refresh_${this.config.email}`);
       
       if (storedToken && typeof storedToken === 'string') {
         this.log.debug('Found stored refresh token, attempting refresh');
@@ -137,6 +138,7 @@ export class NanitPlatform implements DynamicPlatformPlugin {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'nanit-api-version': '1',
       },
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
@@ -204,18 +206,29 @@ export class NanitPlatform implements DynamicPlatformPlugin {
     const existingAccessory = this.accessories.find(acc => acc.UUID === uuid);
 
     if (existingAccessory) {
-      // Update existing accessory
-      this.log.debug('Updating existing accessory:', baby.first_name);
+      // Update existing accessory (including name fix)
+      const correctName = baby.name || baby.first_name || 'Nanit Camera';
+      this.log.info('Updating existing accessory:', correctName);
+      existingAccessory.displayName = correctName;
       existingAccessory.context.baby = baby;
+      existingAccessory
+        .getService(this.api.hap.Service.AccessoryInformation)
+        ?.setCharacteristic(this.api.hap.Characteristic.Name, correctName);
       this.api.updatePlatformAccessories([existingAccessory]);
 
-      const camera = this.cameras.get(baby.uid);
-      if (camera && baby.camera) {
-        camera.updateSensors(baby.camera.temperature, baby.camera.humidity);
+      // Re-create camera handler if not exists
+      if (!this.cameras.has(baby.uid)) {
+        const camera = new NanitCamera(this, existingAccessory, baby);
+        this.cameras.set(baby.uid, camera);
+      } else {
+        const camera = this.cameras.get(baby.uid);
+        if (camera && baby.camera) {
+          camera.updateSensors(baby.camera.temperature, baby.camera.humidity);
+        }
       }
     } else {
       // Create new accessory
-      const name = `${baby.first_name}${baby.last_name ? ' ' + baby.last_name : ''}`;
+      const name = baby.name || baby.first_name || 'Nanit Camera';
       this.log.info('Adding new camera:', name);
 
       const accessory = new this.api.platformAccessory(name, uuid);

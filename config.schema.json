@@ -35,6 +35,21 @@
         "default": 300,
         "minimum": 60,
         "description": "How often to refresh camera list and sensor data (in seconds)"
+      },
+      "streamMode": {
+        "title": "Stream Mode",
+        "type": "string",
+        "default": "cloud",
+        "enum": ["cloud", "local", "auto"],
+        "description": "Streaming mode: cloud (RTMPS from Nanit servers), local (WebSocket to camera on LAN), auto (try local first, fallback to cloud)"
+      },
+      "localRtmpPort": {
+        "title": "Local RTMP Port",
+        "type": "integer",
+        "default": 1935,
+        "minimum": 1024,
+        "maximum": 65535,
+        "description": "Port for local RTMP server (only used for local/auto modes)"
       }
     }
   },
@@ -46,7 +61,9 @@
         "email",
         "password",
         "mfa_code",
-        "refreshInterval"
+        "refreshInterval",
+        "streamMode",
+        "localRtmpPort"
       ]
     }
   ]

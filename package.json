@@ -4,17 +4,24 @@
   "version": "1.0.0",
   "description": "Homebridge plugin for Nanit baby monitors - exposes cameras and sensors to HomeKit",
   "main": "dist/index.js",
+  "bin": {
+    "nanit-auth": "dist/cli.js"
+  },
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
     "clean": "rm -rf dist",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "auth": "ts-node src/cli.ts"
   },
   "keywords": [
     "homebridge-plugin",
     "nanit",
-    "baby monitor",
-    "camera"
+    "baby-monitor",
+    "camera",
+    "homekit",
+    "streaming",
+    "rtmp"
   ],
   "engines": {
     "node": "^18.17.0 || ^20.9.0 || ^22.0.0",
@@ -26,13 +33,20 @@
     "type": "git",
     "url": "https://github.com/michael5wong/homebridge-nanit.git"
   },
+  "bugs": {
+    "url": "https://github.com/michael5wong/homebridge-nanit/issues"
+  },
+  "homepage": "https://github.com/michael5wong/homebridge-nanit#readme",
   "dependencies": {
-    "node-fetch": "^2.7.0"
+    "node-media-server": "^4.2.4",
+    "protobufjs": "^7.5.4",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
-    "@types/node-fetch": "^2.6.11",
+    "@types/ws": "^8.18.1",
     "homebridge": "^1.8.0",
+    "protobufjs-cli": "^1.2.0",
     "typescript": "^5.3.0"
   }
 }

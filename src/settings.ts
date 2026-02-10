@@ -17,6 +17,8 @@ export interface NanitPlatformConfig {
   password: string;
   mfa_code?: string;
   refreshInterval?: number; // seconds between baby list refresh (default: 300)
+  streamMode?: 'cloud' | 'local' | 'auto'; // streaming mode (default: 'cloud')
+  localRtmpPort?: number; // local RTMP server port (default: 1935)
 }
 
 /**
@@ -31,8 +33,10 @@ export interface NanitAuthResponse {
 
 export interface NanitBaby {
   uid: string;
-  first_name: string;
+  name: string;
+  first_name?: string;
   last_name?: string;
+  camera_uid?: string;
   gender?: string;
   camera?: NanitCamera;
 }
