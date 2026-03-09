@@ -29,6 +29,8 @@ export class NanitPlatform implements DynamicPlatformPlugin {
   private refreshInterval?: NodeJS.Timeout;
   private discoveryInterval?: NodeJS.Timeout;
   private rtmpPortCounter = 0;
+  private authFailures = 0;
+  private authDisabled = false;
 
   constructor(log: Logger, config: PlatformConfig, api: API) {
     this.log = log;
@@ -62,6 +64,10 @@ export class NanitPlatform implements DynamicPlatformPlugin {
       this.authenticate().then(() => {
         this.discoverCameras();
         this.startRefreshIntervals();
+      }).catch(err => {
+        // Don't let auth failure crash Homebridge — log and degrade gracefully
+        this.log.error('Initial authentication failed — plugin will not function until credentials are fixed.');
+        this.log.error('Run "npx nanit-auth" to get a fresh refresh token, update config, and restart Homebridge.');
       });
     });
   }
@@ -72,6 +78,12 @@ export class NanitPlatform implements DynamicPlatformPlugin {
   }
 
   async authenticate(): Promise<void> {
+    // Circuit breaker: if auth has failed too many times, stop trying
+    if (this.authDisabled) {
+      this.log.error('Authentication is disabled due to repeated failures. Restart Homebridge after fixing credentials.');
+      throw new Error('Authentication disabled (circuit breaker)');
+    }
+
     try {
       // Try refresh token from config first, then storage
       const configRefreshToken = this.config.refreshToken;
@@ -82,65 +94,27 @@ export class NanitPlatform implements DynamicPlatformPlugin {
         this.log.debug('Found stored refresh token, attempting refresh');
         try {
           await this.refreshAccessToken(storedToken);
+          this.authFailures = 0; // Reset on success
           return;
         } catch (error) {
-          this.log.warn('Stored token refresh failed, performing fresh login');
+          this.log.warn('Refresh token failed:', error);
         }
       }
 
-      // Fresh login (only if password is provided)
-      if (!this.config.password) {
-        this.log.error('No password provided and refresh token is invalid');
-        this.log.error('Please provide either a valid refreshToken or password in config');
-        throw new Error('Authentication failed: no valid credentials');
+      // SAFETY: Never auto-attempt password login — it triggers MFA SMS.
+      // If refresh token failed or is missing, require manual re-auth via CLI.
+      this.authFailures++;
+      if (this.authFailures >= 3) {
+        this.authDisabled = true;
+        this.log.error(`Authentication failed ${this.authFailures} times — disabling to prevent MFA spam.`);
+        this.log.error('To fix: run "npx nanit-auth" on your Mac to get a fresh refresh token,');
+        this.log.error('then update the refreshToken in Homebridge config and restart.');
+      } else {
+        this.log.error(`Authentication failed (attempt ${this.authFailures}/3).`);
+        this.log.error('Refresh token is invalid or expired. Will NOT attempt password login (would trigger MFA SMS).');
+        this.log.error('To fix: run "npx nanit-auth" to get a fresh refresh token and update config.');
       }
-
-      this.log.info('Logging in to Nanit');
-      const loginBody: any = {
-        email: this.config.email,
-        password: this.config.password,
-      };
-
-      // Add MFA code if provided
-      if (this.config.mfa_code) {
-        loginBody.mfa_code = this.config.mfa_code;
-      }
-
-      const abortController = new AbortController();
-      const timeoutId = setTimeout(() => abortController.abort(), 15000);
-      
-      const response = await fetch('https://api.nanit.com/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'nanit-api-version': '1',
-        },
-        body: JSON.stringify(loginBody),
-        signal: abortController.signal,
-      }).finally(() => clearTimeout(timeoutId));
-
-      if (response.status === 482) {
-        // MFA required
-        this.log.error('MFA required. Please run "npx nanit-auth" to authenticate with MFA and get a refresh token.');
-        throw new Error('MFA required');
-      }
-
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Login failed: ${response.status} ${text}`);
-      }
-
-      const data = await response.json() as NanitAuthResponse;
-      this.accessToken = data.access_token;
-      this.refreshToken = data.refresh_token;
-
-      // Store refresh token
-      if (this.refreshToken) {
-        const storage = this.api.hap.HAPStorage.storage();
-        storage.setItemSync(`nanit_refresh_${this.config.email}`, this.refreshToken);
-      }
-
-      this.log.info('Successfully authenticated with Nanit');
+      throw new Error('Authentication failed: refresh token invalid, password login disabled for safety');
     } catch (error) {
       this.log.error('Authentication failed:', error);
       throw error;
@@ -281,9 +255,18 @@ export class NanitPlatform implements DynamicPlatformPlugin {
   startRefreshIntervals(): void {
     // Token refresh every 50 minutes
     this.refreshInterval = setInterval(() => {
+      if (this.authDisabled) {
+        this.log.warn('Skipping token refresh — auth is disabled (circuit breaker)');
+        return;
+      }
       this.log.debug('Auto-refreshing token');
       this.refreshAccessToken().catch(err => {
         this.log.error('Auto token refresh failed:', err);
+        this.authFailures++;
+        if (this.authFailures >= 3) {
+          this.authDisabled = true;
+          this.log.error('Too many refresh failures — disabling auth. Fix credentials and restart Homebridge.');
+        }
       });
     }, 50 * 60 * 1000);
 

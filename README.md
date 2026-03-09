@@ -38,7 +38,7 @@ sudo npm install -g homebridge-nanit
 
 ### 1. Get Your Refresh Token
 
-Nanit requires MFA (multi-factor authentication). Run the included auth helper to get a refresh token:
+Nanit uses MFA (multi-factor authentication), so you can't just put your password in the config. Instead, run the included auth helper **once** to get a refresh token:
 
 ```bash
 npx nanit-auth
@@ -46,14 +46,15 @@ npx nanit-auth
 
 This will:
 1. Ask for your Nanit email and password
-2. Send an MFA code to your phone
+2. Send an MFA code to your phone via SMS
 3. Output a `refreshToken` to add to your config
+
+**⚠️ Important:** The plugin uses *only* the refresh token for authentication. It will **never** attempt password login automatically — this prevents MFA SMS spam if the token expires during Homebridge restart loops.
 
 ### 2. Configure the Plugin
 
 Add this to your Homebridge `config.json` under `platforms`:
 
-**Recommended (refresh token only):**
 ```json
 {
     "platform": "NanitCamera",
@@ -62,15 +63,7 @@ Add this to your Homebridge `config.json` under `platforms`:
 }
 ```
 
-**Alternative (with password as backup):**
-```json
-{
-    "platform": "NanitCamera",
-    "email": "your@email.com",
-    "refreshToken": "your-refresh-token-from-step-1",
-    "password": "your-nanit-password"
-}
-```
+That's it. No password needed in the config.
 
 ### Optional Settings
 
@@ -104,7 +97,7 @@ Tries local streaming first. If the camera's local IP isn't available, falls bac
 
 ## How It Works
 
-1. **Authentication**: Uses Nanit's REST API with email/password + refresh token (handles MFA)
+1. **Authentication**: Uses Nanit's REST API with refresh token (auto-rotates on each use)
 2. **Camera Discovery**: Queries the `/babies` API endpoint to find cameras
 3. **Cloud Streaming**: Connects to `rtmps://media-secured.nanit.com` with auth token
 4. **Local Streaming**: 
@@ -113,10 +106,27 @@ Tries local streaming first. If the camera's local IP isn't available, falls bac
    - Camera pushes RTMP stream directly to Homebridge
    - ffmpeg transcodes to HomeKit-compatible SRTP
 
+## Token Lifecycle & Restarts
+
+Nanit refresh tokens are **single-use** — each time the plugin refreshes its access token, it gets a new refresh token back and stores it automatically. This means:
+
+- ✅ **Normal operation**: Token auto-refreshes every 50 minutes. No action needed.
+- ✅ **Clean restart**: The plugin saves the latest token to Homebridge storage. On restart, it picks up where it left off.
+- ⚠️ **Token expired** (e.g., long downtime, unclean shutdown): The plugin will log an error and **stop gracefully** — it will NOT spam you with MFA texts. After 3 consecutive failures, it activates a circuit breaker and stops retrying entirely.
+
+### If your token expires:
+
+1. Run `npx nanit-auth` on your machine (you'll get one MFA SMS)
+2. Copy the new `refreshToken` into your Homebridge config
+3. Restart Homebridge
+
 ## Troubleshooting
 
-### "MFA required" on startup
-Run `npx nanit-auth` to get a fresh refresh token and update your config.
+### "Authentication disabled (circuit breaker)" in logs
+The plugin failed to authenticate 3 times and stopped trying. Run `npx nanit-auth` to get a fresh refresh token, update your config, and restart Homebridge.
+
+### "Refresh token invalid, password login disabled" in logs
+Your stored refresh token is expired or was rotated. Same fix: `npx nanit-auth` → update config → restart.
 
 ### Camera shows but no video
 - Check that `ffmpeg` is installed: `ffmpeg -version`
