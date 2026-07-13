@@ -18,7 +18,7 @@ export interface NanitPlatformConfig {
   refreshToken?: string;
   mfa_code?: string;
   refreshInterval?: number; // seconds between baby list refresh (default: 300)
-  streamMode?: 'cloud' | 'local' | 'auto'; // streaming mode (default: 'cloud')
+  streamMode?: 'cloud' | 'local' | 'auto'; // streaming mode (default: 'auto')
   localRtmpPort?: number; // local RTMP server port (default: 1935)
   localAddress?: string; // optional host IP override for local streaming
 }

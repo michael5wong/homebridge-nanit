@@ -48,7 +48,7 @@ export class NanitCamera {
   }
 
   private setupCamera(): void {
-    const streamMode = this.platform.config.streamMode || 'cloud';
+    const streamMode = this.platform.config.streamMode || 'auto';
     const rtmpPort = this.platform.allocateRtmpPort();
     this.log.debug(`[${this.getName()}] Assigned RTMP port ${rtmpPort}`);
     // API returns private_address as "ip:port" — extract just the IP
@@ -85,6 +85,7 @@ export class NanitCamera {
         this.baby.uid,
         this.platform.config.localAddress,
       );
+      this.streamingDelegate.cloudFallbackGetUrl = () => this.getStreamUrl();
     } else {
       // Default to cloud streaming
       if (streamMode !== 'cloud') {

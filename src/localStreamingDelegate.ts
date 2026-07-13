@@ -44,8 +44,11 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
   private readonly rtmpPort: number;
   private readonly sessions: Map<string, { process?: ChildProcess; ws?: WebSocket; info?: SessionInfo }> = new Map();
   private rtmpServer?: any;
+  private readonly rtmpPublishing = new Set<string>();
+  private readonly rtmpPublishWaiters = new Map<string, Array<() => void>>();
   private wsRequestId = 1;
   private startingSessions: Set<string> = new Set();
+  public cloudFallbackGetUrl?: () => string;
 
   controller?: CameraController;
 
@@ -94,6 +97,34 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
     };
 
     this.rtmpServer = new NodeMediaServer(config);
+    this.rtmpServer.on('postPublish', (session: { streamPath?: string }) => {
+      const streamPath = session.streamPath;
+      if (!streamPath) {
+        return;
+      }
+
+      this.rtmpPublishing.add(streamPath);
+      this.log.info(`[${this.name}] Camera RTMP publisher connected: ${streamPath}`);
+
+      const waiters = this.rtmpPublishWaiters.get(streamPath);
+      if (waiters) {
+        this.rtmpPublishWaiters.delete(streamPath);
+        for (const resolve of waiters) {
+          resolve();
+        }
+      }
+    });
+
+    this.rtmpServer.on('donePublish', (session: { streamPath?: string }) => {
+      const streamPath = session.streamPath;
+      if (!streamPath) {
+        return;
+      }
+
+      this.rtmpPublishing.delete(streamPath);
+      this.log.debug(`[${this.name}] Camera RTMP publisher disconnected: ${streamPath}`);
+    });
+
     this.rtmpServer.run();
 
     this.log.info(`[${this.name}] Local RTMP server started on port ${this.rtmpPort}`);
@@ -196,6 +227,57 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
     
     this.log.debug(`[${this.name}] Sending PUT_STREAMING request to ${rtmpUrl}`);
     ws.send(buffer);
+  }
+
+  private sendStopStreamingRequest(ws: WebSocket): void {
+    const requestId = this.wsRequestId++;
+    const request = client.Request.create({
+      id: requestId,
+      type: client.RequestType.PUT_STREAMING,
+      streaming: client.Streaming.create({
+        id: client.StreamIdentifier.MOBILE,
+        status: client.Streaming.Status.STOPPED,
+        rtmpUrl: '',
+      }),
+    });
+
+    const message = client.Message.create({
+      type: client.Message.Type.REQUEST,
+      request,
+    });
+
+    ws.send(client.Message.encode(message).finish());
+  }
+
+  private waitForRtmpPublisher(streamKey: string, timeoutMs = 12000): Promise<void> {
+    const streamPath = `/live/${streamKey}`;
+    if (this.rtmpPublishing.has(streamPath)) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
+      const waiters = this.rtmpPublishWaiters.get(streamPath) || [];
+      const onPublish = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      waiters.push(onPublish);
+      this.rtmpPublishWaiters.set(streamPath, waiters);
+
+      const timer = setTimeout(() => {
+        const activeWaiters = this.rtmpPublishWaiters.get(streamPath);
+        if (activeWaiters) {
+          const index = activeWaiters.indexOf(onPublish);
+          if (index !== -1) {
+            activeWaiters.splice(index, 1);
+          }
+          if (activeWaiters.length === 0) {
+            this.rtmpPublishWaiters.delete(streamPath);
+          }
+        }
+        reject(new Error(`Timed out waiting for camera RTMP publish on ${streamPath}`));
+      }, timeoutMs);
+    });
   }
 
   async handleSnapshotRequest(request: SnapshotRequest, callback: SnapshotRequestCallback): Promise<void> {
@@ -319,18 +401,6 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
 
         session.ws = ws;
 
-        // Request camera to push RTMP to our local server
-        // Detect Homebridge host's LAN IP for the camera to connect to
-        const hostIp = this.getHostIp();
-        const streamKey = `nanit_${sessionId}`;
-        const rtmpUrl = `rtmp://${hostIp}:${this.rtmpPort}/live/${streamKey}`;
-        this.log.info(`[${this.name}] Requesting camera to push RTMP to ${rtmpUrl}`);
-        this.sendStreamingRequest(ws, rtmpUrl);
-
-        // Wait a bit for the camera to start pushing
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        // Start ffmpeg to transcode from local RTMP to HomeKit
         const video = request.video;
         const info = session.info;
         if (!info) {
@@ -343,10 +413,43 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
 
         const videoSrtpKey = info.videoSRTP.toString('base64');
         const videoSsrc = info.videoSSRC;
+        let inputUrl: string;
+        let usingCloudFallback = false;
+
+        try {
+          // Request camera to push RTMP to our local server. Use a stable, simple
+          // stream key: some camera firmware is touchy about path characters.
+          const hostIp = this.getHostIp();
+          const streamKey = `nanit_${this.babyUid}`;
+          const rtmpUrl = `rtmp://${hostIp}:${this.rtmpPort}/live/${streamKey}`;
+          this.log.info(`[${this.name}] Requesting camera to push RTMP to ${rtmpUrl}`);
+          this.sendStreamingRequest(ws, rtmpUrl);
+          this.log.debug(`[${this.name}] Waiting for camera RTMP publish`);
+          await this.waitForRtmpPublisher(streamKey);
+          inputUrl = rtmpUrl;
+        } catch (localError) {
+          this.log.warn(`[${this.name}] Local RTMP did not start: ${localError instanceof Error ? localError.message : String(localError)}`);
+          try {
+            this.sendStopStreamingRequest(ws);
+          } catch (stopError) {
+            this.log.debug(`[${this.name}] Failed to send Nanit STOPPED after local timeout: ${stopError instanceof Error ? stopError.message : String(stopError)}`);
+          }
+          ws.close();
+          session.ws = undefined;
+
+          if (!this.cloudFallbackGetUrl) {
+            throw localError;
+          }
+
+          inputUrl = this.cloudFallbackGetUrl();
+          usingCloudFallback = true;
+          this.log.warn(`[${this.name}] Falling back to cloud stream`);
+        }
 
         const ffmpegArgs = [
           '-re',
-          '-i', rtmpUrl,
+          ...(usingCloudFallback ? ['-rw_timeout', '10000000'] : []),
+          '-i', inputUrl,
           '-map', '0:v',
           '-vcodec', 'libx264',
           '-preset', 'ultrafast',
@@ -365,15 +468,20 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
           `srtp://${target}:${videoPort}?rtcpport=${videoPort}&pkt_size=1316`,
         ];
 
-        this.log.debug(`[${this.name}] FFmpeg command starting (SRTP params redacted for security)`);
+        this.log.info(`[${this.name}] FFmpeg starting from ${usingCloudFallback ? 'cloud fallback' : 'local RTMP'}`);
 
         const ffmpeg = spawn('ffmpeg', ffmpegArgs, { env: process.env });
         session.process = ffmpeg;
 
         ffmpeg.stderr.on('data', (data) => {
-          const message = data.toString();
-          if (message.includes('error') || message.includes('Error')) {
-            this.log.error(`[${this.name}] FFmpeg:`, message);
+          const message = data.toString().trim();
+          if (!message) {
+            return;
+          }
+          if (/error|Error|Invalid|failed|Connection|Immediate exit/i.test(message)) {
+            this.log.error(`[${this.name}] FFmpeg: ${message}`);
+          } else {
+            this.log.debug(`[${this.name}] FFmpeg: ${message}`);
           }
         });
 
@@ -381,8 +489,8 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
           this.log.error(`[${this.name}] FFmpeg process error:`, error.message);
         });
 
-        ffmpeg.on('close', () => {
-          this.log.info(`[${this.name}] Video stream stopped`);
+        ffmpeg.on('close', (code, signal) => {
+          this.log.info(`[${this.name}] Video stream stopped (exit=${code}, signal=${signal ?? 'none'})`);
         });
 
         callback();
@@ -409,24 +517,7 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
 
         // Stop streaming on camera
         if (session.ws && session.ws.readyState === WebSocket.OPEN) {
-          const requestId = this.wsRequestId++;
-          const request = client.Request.create({
-            id: requestId,
-            type: client.RequestType.PUT_STREAMING,
-            streaming: client.Streaming.create({
-              id: client.StreamIdentifier.MOBILE,
-              status: client.Streaming.Status.STOPPED,
-              rtmpUrl: '',
-            }),
-          });
-
-          const message = client.Message.create({
-            type: client.Message.Type.REQUEST,
-            request: request,
-          });
-
-          const buffer = client.Message.encode(message).finish();
-          session.ws.send(buffer);
+          this.sendStopStreamingRequest(session.ws);
           session.ws.close();
         }
       }

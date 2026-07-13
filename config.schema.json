@@ -41,7 +41,7 @@
       "streamMode": {
         "title": "Stream Mode",
         "type": "string",
-        "default": "cloud",
+        "default": "auto",
         "enum": ["cloud", "local", "auto"],
         "description": "Streaming mode: cloud (RTMPS from Nanit servers), local (WebSocket to camera on LAN), auto (try local first, fallback to cloud)"
       },
