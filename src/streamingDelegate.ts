@@ -59,6 +59,7 @@ export class NanitStreamingDelegate implements CameraStreamingDelegate {
 
     const streamUrl = this.getStreamUrl();
     const ffmpegArgs = [
+      '-rw_timeout', '10000000',
       '-i', streamUrl,
       '-frames:v', '1',
       '-f', 'image2',
@@ -156,6 +157,7 @@ export class NanitStreamingDelegate implements CameraStreamingDelegate {
 
       const ffmpegArgs = [
         '-re',
+        '-rw_timeout', '10000000',
         '-i', streamUrl,
         '-map', '0:v',
         '-vcodec', 'libx264',
@@ -181,10 +183,14 @@ export class NanitStreamingDelegate implements CameraStreamingDelegate {
       session.process = ffmpeg;
 
       ffmpeg.stderr.on('data', (data) => {
-        // Only log errors, not all ffmpeg output
-        const message = data.toString();
-        if (message.includes('error') || message.includes('Error')) {
-          this.log.error(`[${this.name}] FFmpeg:`, message);
+        const message = data.toString().trim();
+        if (!message) {
+          return;
+        }
+        if (/error|Error|Invalid|failed|Connection|Immediate exit/i.test(message)) {
+          this.log.error(`[${this.name}] FFmpeg: ${message}`);
+        } else {
+          this.log.debug(`[${this.name}] FFmpeg: ${message}`);
         }
       });
 
@@ -192,8 +198,8 @@ export class NanitStreamingDelegate implements CameraStreamingDelegate {
         this.log.error(`[${this.name}] FFmpeg process error:`, error.message);
       });
 
-      ffmpeg.on('close', () => {
-        this.log.info(`[${this.name}] Video stream stopped`);
+      ffmpeg.on('close', (code, signal) => {
+        this.log.info(`[${this.name}] Video stream stopped (exit=${code}, signal=${signal ?? 'none'})`);
       });
 
       callback();

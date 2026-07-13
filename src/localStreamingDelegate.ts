@@ -212,6 +212,7 @@ export class LocalStreamingDelegate implements CameraStreamingDelegate {
     // For snapshots, we'll use the cloud URL as a fallback since local RTMP might not be running
     const cloudUrl = `rtmps://media-secured.nanit.com/nanit/${this.babyUid}.${this.getAccessToken()}`;
     const ffmpegArgs = [
+      '-rw_timeout', '10000000',
       '-i', cloudUrl,
       '-frames:v', '1',
       '-f', 'image2',
