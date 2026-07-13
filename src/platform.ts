@@ -85,19 +85,25 @@ export class NanitPlatform implements DynamicPlatformPlugin {
     }
 
     try {
-      // Try refresh token from config first, then storage
-      const configRefreshToken = this.config.refreshToken;
       const storage = this.api.hap.HAPStorage.storage();
-      const storedToken = configRefreshToken || storage.getItemSync(`nanit_refresh_${this.config.email}`);
-      
-      if (storedToken && typeof storedToken === 'string') {
-        this.log.debug('Found stored refresh token, attempting refresh');
+      const storedRefreshToken = storage.getItemSync(`nanit_refresh_${this.config.email}`);
+      const refreshTokenCandidates = [
+        { source: 'stored', token: storedRefreshToken },
+        { source: 'config', token: this.config.refreshToken },
+      ].filter((candidate, index, candidates) =>
+        typeof candidate.token === 'string' &&
+        candidate.token.length > 0 &&
+        candidates.findIndex(other => other.token === candidate.token) === index,
+      ) as Array<{ source: string; token: string }>;
+
+      for (const candidate of refreshTokenCandidates) {
+        this.log.debug(`Found ${candidate.source} refresh token, attempting refresh`);
         try {
-          await this.refreshAccessToken(storedToken);
+          await this.refreshAccessToken(candidate.token);
           this.authFailures = 0; // Reset on success
           return;
         } catch (error) {
-          this.log.warn('Refresh token failed:', error);
+          this.log.warn(`${candidate.source} refresh token failed:`, error);
         }
       }
 
