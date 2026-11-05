@@ -10,6 +10,7 @@ type SensorService = typeof Service.TemperatureSensor | typeof Service.HumidityS
 import { NanitPlatform } from './platform';
 import { NanitBaby, NanitCameraInfo, babyName } from './nanitApi';
 import { Log, withPrefix } from './log';
+import { AudioEncoder } from './streaming/audio';
 import { StreamingDelegate } from './streaming/delegate';
 import { LocalSource, VideoSource, cloudSource, withFallback } from './streaming/sources';
 
@@ -23,6 +24,7 @@ export class NanitCamera {
     private readonly platform: NanitPlatform,
     private readonly accessory: PlatformAccessory,
     private baby: NanitBaby,
+    audioEncoders: readonly AudioEncoder[],
   ) {
     this.hap = platform.api.hap;
     this.log = withPrefix(platform.log, babyName(baby));
@@ -39,6 +41,7 @@ export class NanitCamera {
       this.log,
       this.videoSource(),
       () => this.cloudStreamUrl(),
+      audioEncoders,
     );
     this.accessory.configureController(this.streamingDelegate.controller);
 

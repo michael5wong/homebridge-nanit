@@ -17,11 +17,13 @@ export interface SrtpTarget {
   srtpParams: string;
 }
 
-export function streamArgs(inputUrl: string, video: VideoInfo, target: SrtpTarget): string[] {
+export function inputArgs(inputUrl: string): string[] {
+  return [...COMMON_ARGS, '-rw_timeout', INPUT_TIMEOUT_US, '-i', inputUrl];
+}
+
+/** ffmpeg output args sending the input's video to HomeKit over SRTP. */
+export function videoOutputArgs(video: VideoInfo, target: SrtpTarget): string[] {
   return [
-    ...COMMON_ARGS,
-    '-rw_timeout', INPUT_TIMEOUT_US,
-    '-i', inputUrl,
     '-map', '0:v',
     '-vcodec', 'libx264',
     '-preset', 'ultrafast',
@@ -32,12 +34,19 @@ export function streamArgs(inputUrl: string, video: VideoInfo, target: SrtpTarge
     '-maxrate', `${video.max_bit_rate}k`,
     '-pix_fmt', 'yuv420p',
     '-an',
-    '-payload_type', String(video.pt),
+    ...srtpOutputArgs(target, video.pt, 1316),
+  ];
+}
+
+/** The RTP muxer and SRTP destination that end every HomeKit output. */
+export function srtpOutputArgs(target: SrtpTarget, payloadType: number, packetSize: number): string[] {
+  return [
+    '-payload_type', String(payloadType),
     '-ssrc', String(target.ssrc),
     '-f', 'rtp',
     '-srtp_out_suite', 'AES_CM_128_HMAC_SHA1_80',
     '-srtp_out_params', target.srtpParams,
-    `srtp://${target.address}:${target.port}?rtcpport=${target.port}&pkt_size=1316`,
+    `srtp://${target.address}:${target.port}?rtcpport=${target.port}&pkt_size=${packetSize}`,
   ];
 }
 
@@ -62,7 +71,7 @@ export function spawnFfmpeg(args: string[], log: Log): ChildProcessWithoutNullSt
 export function captureSnapshot(inputUrl: string, log: Log): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const proc = spawnFfmpeg(
-      [...COMMON_ARGS, '-rw_timeout', INPUT_TIMEOUT_US, '-i', inputUrl, '-frames:v', '1', '-f', 'image2', '-'],
+      [...inputArgs(inputUrl), '-frames:v', '1', '-update', '1', '-f', 'image2', '-'],
       log,
     );
     const chunks: Buffer[] = [];

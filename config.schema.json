@@ -51,6 +51,12 @@
         "title": "Local Address",
         "type": "string",
         "description": "Optional: Override the automatically detected host IP for local streaming"
+      },
+      "audio": {
+        "title": "Audio",
+        "type": "boolean",
+        "default": true,
+        "description": "Stream the camera's audio to HomeKit. Needs ffmpeg with libopus or libfdk_aac; turn off if streams fail with \"matches no streams\"."
       }
     },
     "required": [
@@ -68,7 +74,8 @@
         "refreshInterval",
         "streamMode",
         "localRtmpPort",
-        "localAddress"
+        "localAddress",
+        "audio"
       ]
     }
   ]

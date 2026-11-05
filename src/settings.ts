@@ -20,4 +20,6 @@ export interface NanitPlatformConfig extends PlatformConfig {
   localRtmpPort?: number;
   /** Host IP cameras should publish to; auto-detected if unset. */
   localAddress?: string;
+  /** Stream camera audio to HomeKit (default true). Needs ffmpeg with libopus or libfdk_aac. */
+  audio?: boolean;
 }

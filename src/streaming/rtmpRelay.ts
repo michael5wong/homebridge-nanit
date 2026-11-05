@@ -14,7 +14,8 @@ import { Log } from '../log';
  */
 export class RtmpRelay {
   private started = false;
-  private readonly publishing = new Set<string>();
+  /** Publisher sessions by stream path. */
+  private readonly publishers = new Map<string, NodeMediaServer.Session>();
   private readonly events = new EventEmitter().setMaxListeners(0);
 
   constructor(
@@ -40,14 +41,15 @@ export class RtmpRelay {
     // The constructor forces NMS's own console logger to debug level.
     nmsLogger.level = 'error';
 
-    server.on('postPublish', ({ streamPath }) => {
+    server.on('postPublish', (session) => {
+      const { streamPath } = session;
       this.log.debug(`RTMP publisher connected: ${streamPath}`);
-      this.publishing.add(streamPath);
+      this.publishers.set(streamPath, session);
       this.events.emit(`publish:${streamPath}`);
     });
     server.on('donePublish', ({ streamPath }) => {
       this.log.debug(`RTMP publisher disconnected: ${streamPath}`);
-      this.publishing.delete(streamPath);
+      this.publishers.delete(streamPath);
       this.events.emit(`unpublish:${streamPath}`);
     });
 
@@ -55,15 +57,12 @@ export class RtmpRelay {
     this.log.info(`Local RTMP server listening on port ${this.port}`);
   }
 
-  /**
-   * Resolve once something publishes to `streamPath`. Call this *before*
-   * asking the camera to publish so the event can't be missed.
-   */
+  /** Resolve once something is publishing to `streamPath`, immediately if it already is. */
   waitForPublish(streamPath: string, timeoutMs: number, signal: AbortSignal): Promise<void> {
     if (signal.aborted) {
       return Promise.reject(signal.reason);
     }
-    if (this.publishing.has(streamPath)) {
+    if (this.isPublishing(streamPath)) {
       return Promise.resolve();
     }
 
@@ -89,6 +88,15 @@ export class RtmpRelay {
       this.events.on(event, onPublish);
       signal.addEventListener('abort', onAbort, { once: true });
     });
+  }
+
+  isPublishing(streamPath: string): boolean {
+    return this.publishers.has(streamPath);
+  }
+
+  /** Cut off whoever is publishing to `streamPath`, if anyone. */
+  disconnect(streamPath: string): void {
+    this.publishers.get(streamPath)?.close();
   }
 
   onUnpublish(streamPath: string, listener: () => void): void {

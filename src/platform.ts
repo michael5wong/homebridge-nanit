@@ -13,6 +13,7 @@ import { TokenStore } from './tokenStore';
 import { NanitBaby, babyName, getBabies } from './nanitApi';
 import { errorMessage, withPrefix } from './log';
 import { RtmpRelay } from './streaming/rtmpRelay';
+import { AudioEncoder, detectAudioEncoders } from './streaming/audio';
 
 const TOKEN_REFRESH_MS = 50 * 60 * 1000;
 const DEFAULT_DISCOVERY_INTERVAL_S = 300;
@@ -27,6 +28,8 @@ export class NanitPlatform implements DynamicPlatformPlugin {
   private readonly accessories = new Map<string, PlatformAccessory>();
   private readonly cameras = new Map<string, NanitCamera>();
   private readonly timers: NodeJS.Timeout[] = [];
+  /** Detected once at startup, before any camera is created. */
+  private audioEncoders: readonly AudioEncoder[] = [];
 
   constructor(
     readonly log: Logger,
@@ -47,7 +50,7 @@ export class NanitPlatform implements DynamicPlatformPlugin {
       return;
     }
 
-    api.on('didFinishLaunching', () => this.start());
+    api.on('didFinishLaunching', () => void this.start());
     api.on('shutdown', () => this.shutdown());
   }
 
@@ -56,7 +59,13 @@ export class NanitPlatform implements DynamicPlatformPlugin {
     this.accessories.set(accessory.UUID, accessory);
   }
 
-  private start(): void {
+  private async start(): Promise<void> {
+    if (this.config.audio === false) {
+      this.log.info('Audio is disabled in config');
+    } else {
+      this.audioEncoders = await detectAudioEncoders(this.log);
+    }
+
     void this.sync();
     this.timers.push(
       setInterval(() => {
@@ -116,14 +125,14 @@ export class NanitPlatform implements DynamicPlatformPlugin {
         this.api.updatePlatformAccessories([cached]);
       }
       if (!camera) {
-        this.cameras.set(uuid, new NanitCamera(this, cached, baby));
+        this.cameras.set(uuid, new NanitCamera(this, cached, baby, this.audioEncoders));
       }
       return uuid;
     }
 
     this.log.info('Adding camera:', name);
     const accessory = new this.api.platformAccessory(name, uuid);
-    this.cameras.set(uuid, new NanitCamera(this, accessory, baby));
+    this.cameras.set(uuid, new NanitCamera(this, accessory, baby, this.audioEncoders));
     this.accessories.set(uuid, accessory);
     this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
     return uuid;

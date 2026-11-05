@@ -8,6 +8,7 @@ A [Homebridge](https://homebridge.io) plugin that exposes [Nanit](https://www.na
 ## Features
 
 - 📹 **Live video streaming** via HomeKit (Home app, Control Center)
+- 🔊 **Audio** — hear the nursery in the Home app (Opus or AAC-ELD)
 - 🌡️ **Temperature sensor** — ambient room temperature from the Nanit
 - 💧 **Humidity sensor** — ambient humidity from the Nanit
 - 🏠 **Local streaming** — the camera streams straight to Homebridge over your LAN
@@ -20,7 +21,7 @@ A [Homebridge](https://homebridge.io) plugin that exposes [Nanit](https://www.na
 - Homebridge 1.6+ or 2.0+
 - Node.js 18.17+
 - Nanit camera (Gen 2+ recommended)
-- `ffmpeg` installed on your Homebridge host
+- `ffmpeg` installed on your Homebridge host, with `libx264`. For audio it also needs `libopus` or `libfdk_aac` (see [Audio](#audio))
 
 ## Installation
 
@@ -74,7 +75,8 @@ That's it. No password needed in the config.
     "refreshToken": "your-refresh-token",
     "streamMode": "auto",
     "localRtmpPort": 1935,
-    "localAddress": "192.168.1.100"
+    "localAddress": "192.168.1.100",
+    "audio": true
 }
 ```
 
@@ -84,6 +86,7 @@ That's it. No password needed in the config.
 | `localRtmpPort` | `1935` | Port of the RTMP server cameras publish to in local/auto mode (shared by all cameras) |
 | `localAddress` | Auto-detect | Host IP cameras should publish to. Set this if Homebridge has several network interfaces |
 | `refreshInterval` | `300` | Seconds between camera list / sensor refreshes |
+| `audio` | `true` | Stream the camera's audio to HomeKit. Set to `false` for video only |
 
 ## Streaming Modes
 
@@ -95,6 +98,23 @@ The camera pushes its RTMP stream straight to Homebridge over your LAN. Lower la
 
 ### Cloud
 Streams via Nanit's RTMPS servers. Works everywhere, slightly higher latency.
+
+## Audio
+
+Audio is one-way, from the camera to your phone. At startup the plugin checks which audio encoders your ffmpeg has and offers HomeKit only the codecs it can produce:
+
+| ffmpeg encoder | HomeKit codec |
+|---|---|
+| `libopus` | Opus (16 or 24 kHz) |
+| `libfdk_aac` | AAC-ELD (16 kHz) |
+
+HomeKit picks one per stream. To see what your ffmpeg has, run this where Homebridge runs (inside the container if you use Docker):
+
+```bash
+ffmpeg -hide_banner -encoders | grep -E 'libx264|libopus|libfdk_aac'
+```
+
+`libopus` comes with most ffmpeg builds. `libfdk_aac` usually needs a custom build, but you only need one of the two. If neither is found, the plugin logs a warning and streams video only.
 
 ## How It Works
 
@@ -131,6 +151,14 @@ Your refresh token is expired or was revoked. Run `npx nanit-auth` to get a fres
 - Check that `ffmpeg` is installed: `ffmpeg -version`
 - Check Homebridge logs for ffmpeg errors
 - Try `"streamMode": "cloud"` if local streaming has issues
+
+### Video fails with "Stream map '0:a:0' matches no streams"
+The camera's stream has no audio track, and ffmpeg won't start without one when audio is on. Set `"audio": false`.
+
+### No sound
+- Look for "Audio codecs:" near the start of the Homebridge log. A warning there means ffmpeg has neither `libopus` nor `libfdk_aac`
+- Check the camera isn't muted in the Home app (the speaker button on the live view)
+- With debug logging on, "Not streaming audio" in the log means HomeKit chose a codec this plugin didn't offer
 
 ### "USER_LOGGED_OUT" in logs
 Your refresh token has expired. Run `npx nanit-auth` again to get a new one.

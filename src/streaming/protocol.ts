@@ -16,6 +16,7 @@ const root = Root.fromJSON({
             id: { rule: 'required', type: 'StreamIdentifier', id: 1 },
             status: { rule: 'required', type: 'Status', id: 2 },
             rtmpUrl: { rule: 'required', type: 'string', id: 3 },
+            attempts: { type: 'int32', id: 4 },
           },
           nested: { Status: { values: { STARTED: 0, STOPPED: 1, PAUSED: 2 } } },
         },
@@ -70,7 +71,8 @@ export function encodePutStreaming(requestId: number, status: StreamingStatus, r
     request: {
       id: requestId,
       type: REQUEST_TYPE_PUT_STREAMING,
-      streaming: { id: STREAM_ID_MOBILE, status, rtmpUrl },
+      // attempts: 1, as other open-source Nanit clients send.
+      streaming: { id: STREAM_ID_MOBILE, status, rtmpUrl, attempts: 1 },
     },
   }).finish();
 }
