@@ -15,7 +15,7 @@
     "package.json"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"for (const f of ['nanit.proto.js', 'nanit.proto.d.ts']) require('fs').copyFileSync('src/' + f, 'dist/' + f)\"",
     "watch": "tsc -w",
     "clean": "rm -rf dist",
     "prepare": "npm run build",
@@ -31,7 +31,7 @@
     "rtmp"
   ],
   "engines": {
-    "node": "^18.17.0 || ^20.9.0 || ^22.0.0",
+    "node": "^18.17.0 || ^20.9.0 || ^22.0.0 || ^24.0.0",
     "homebridge": "^1.6.0 || ^2.0.0"
   },
   "author": "Michael Wong",
