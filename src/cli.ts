@@ -2,9 +2,10 @@
 
 import * as readline from 'readline';
 import { Writable } from 'stream';
+import { login } from './nanitApi';
 
-const API_BASE = 'https://api.nanit.com';
 const MAX_MFA_ATTEMPTS = 3;
+const RATE_LIMITED = 'Too many requests. Please wait a few minutes and try again.';
 
 // A single readline interface owns stdin for the whole session. Hidden input
 // (password) is done by muting what readline echoes, rather than attaching a
@@ -49,24 +50,6 @@ function askHidden(question: string): Promise<string> {
   });
 }
 
-async function postLogin(body: Record<string, unknown>): Promise<Response> {
-  const abortController = new AbortController();
-  const timeoutId = setTimeout(() => abortController.abort(), 15000);
-  try {
-    return await fetch(`${API_BASE}/login`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'nanit-api-version': '1',
-      },
-      body: JSON.stringify(body),
-      signal: abortController.signal,
-    });
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
 async function main(): Promise<number> {
   console.log('\n🍼 Nanit Homebridge Auth Helper\n');
   console.log('This will log in to your Nanit account and generate a refresh token');
@@ -81,30 +64,21 @@ async function main(): Promise<number> {
   }
 
   console.log('\nLogging in...');
-  const loginResponse = await postLogin({ email, password });
-
-  if (loginResponse.ok) {
-    // No MFA required
-    const data = await loginResponse.json() as any;
-    return printResult(email, data.refresh_token);
+  const result = await login({ email, password });
+  switch (result.kind) {
+    case 'ok':
+      return printResult(email, result.refreshToken);
+    case 'rate_limited':
+      console.error(`\n❌ ${RATE_LIMITED}`);
+      return 1;
+    case 'failed':
+      console.error(`\n❌ Login failed: ${result.error.message}`);
+      return 1;
   }
 
-  if (loginResponse.status === 429) {
-    console.error('\n❌ Too many requests. Please wait a few minutes and try again.');
-    return 1;
-  }
-
-  if (loginResponse.status !== 482) {
-    const error = await loginResponse.text();
-    console.error(`\n❌ Login failed (${loginResponse.status}): ${error}`);
-    return 1;
-  }
-
-  // MFA required — the SMS has been sent. Reuse the same mfa_token for retries
+  // MFA required: the SMS has been sent. Reuse the same mfa_token for retries
   // so a mistyped code doesn't trigger another SMS.
-  const mfaData = await loginResponse.json() as any;
-  const suffix = mfaData.phone_suffix || '??';
-  console.log(`\n📱 MFA code sent to your phone ending in ${suffix}`);
+  console.log(`\n📱 MFA code sent to your phone ending in ${result.phoneSuffix ?? '??'}`);
 
   for (let attempt = 1; attempt <= MAX_MFA_ATTEMPTS; attempt++) {
     const mfaCode = (await ask('Enter MFA code: ')).replace(/\s+/g, '');
@@ -114,24 +88,16 @@ async function main(): Promise<number> {
     }
 
     console.log('Verifying...');
-    const mfaResponse = await postLogin({
-      email,
-      password,
-      mfa_token: mfaData.mfa_token,
-      mfa_code: mfaCode,
-    });
-
-    if (mfaResponse.ok) {
-      const data = await mfaResponse.json() as any;
-      return printResult(email, data.refresh_token);
+    const verification = await login({ email, password, mfa_token: result.mfaToken, mfa_code: mfaCode });
+    if (verification.kind === 'ok') {
+      return printResult(email, verification.refreshToken);
     }
-
-    const error = await mfaResponse.text();
-    console.error(`❌ MFA verification failed (${mfaResponse.status}): ${error}`);
-    if (mfaResponse.status === 429) {
-      console.error('Too many requests. Please wait a few minutes and try again.');
+    if (verification.kind === 'rate_limited') {
+      console.error(`❌ ${RATE_LIMITED}`);
       return 1;
     }
+
+    console.error(`❌ MFA verification failed${verification.kind === 'failed' ? `: ${verification.error.message}` : ''}`);
     if (attempt < MAX_MFA_ATTEMPTS) {
       console.log(`Try again (${MAX_MFA_ATTEMPTS - attempt} attempt(s) left).`);
     }

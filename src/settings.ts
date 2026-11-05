@@ -1,57 +1,23 @@
-/**
- * This is the name of the platform that users will use to register the plugin in the Homebridge config.json
- */
+import { PlatformConfig } from 'homebridge';
+
+/** The platform name users put in config.json. */
 export const PLATFORM_NAME = 'NanitCamera';
 
-/**
- * This must match the name of your plugin as defined the package.json
- */
+/** Must match `name` in package.json. */
 export const PLUGIN_NAME = 'homebridge-nanit';
 
-/**
- * Platform configuration interface
- */
-export interface NanitPlatformConfig {
-  platform: string;
+export type StreamMode = 'cloud' | 'local' | 'auto';
+
+export interface NanitPlatformConfig extends PlatformConfig {
   email: string;
-  password?: string;
+  /** From the nanit-auth CLI. Only needed until the plugin has stored a rotated token. */
   refreshToken?: string;
-  mfa_code?: string;
-  refreshInterval?: number; // seconds between baby list refresh (default: 300)
-  streamMode?: 'cloud' | 'local' | 'auto'; // streaming mode (default: 'auto')
-  localRtmpPort?: number; // local RTMP server port (default: 1935)
-  localAddress?: string; // optional host IP override for local streaming
-}
-
-/**
- * Nanit API types
- */
-export interface NanitAuthResponse {
-  access_token: string;
-  refresh_token: string;
-  token_type: string;
-  mfa_token?: string;
-}
-
-export interface NanitBaby {
-  uid: string;
-  name: string;
-  first_name?: string;
-  last_name?: string;
-  camera_uid?: string;
-  gender?: string;
-  camera?: NanitCamera;
-}
-
-export interface NanitCamera {
-  uid: string;
-  private_address?: string;
-  stream_url?: string;
-  local_ip?: string;
-  temperature?: number;
-  humidity?: number;
-}
-
-export interface NanitBabiesResponse {
-  babies: NanitBaby[];
+  /** Seconds between camera list refreshes (default 300). */
+  refreshInterval?: number;
+  /** Default 'auto': local, falling back to cloud. */
+  streamMode?: StreamMode;
+  /** Port of the local RTMP server cameras publish to (default 1935). */
+  localRtmpPort?: number;
+  /** Host IP cameras should publish to; auto-detected if unset. */
+  localAddress?: string;
 }

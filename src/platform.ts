@@ -1,3 +1,4 @@
+import * as path from 'path';
 import {
   API,
   DynamicPlatformPlugin,
@@ -5,361 +6,134 @@ import {
   PlatformAccessory,
   PlatformConfig,
 } from 'homebridge';
-// Node 18+ has native fetch, no import needed
-import * as fs from 'fs';
-import * as path from 'path';
-import {
-  PLATFORM_NAME,
-  PLUGIN_NAME,
-  NanitPlatformConfig,
-  NanitAuthResponse,
-  NanitBabiesResponse,
-  NanitBaby,
-} from './settings';
+import { PLATFORM_NAME, PLUGIN_NAME, NanitPlatformConfig } from './settings';
 import { NanitCamera } from './camera';
+import { NanitAuth } from './auth';
+import { TokenStore } from './tokenStore';
+import { NanitBaby, babyName, getBabies } from './nanitApi';
+import { errorMessage, withPrefix } from './log';
+import { RtmpRelay } from './streaming/rtmpRelay';
+
+const TOKEN_REFRESH_MS = 50 * 60 * 1000;
+const DEFAULT_DISCOVERY_INTERVAL_S = 300;
 
 export class NanitPlatform implements DynamicPlatformPlugin {
-  public readonly log: Logger;
-  public readonly config: NanitPlatformConfig;
-  public readonly api: API;
+  readonly config: NanitPlatformConfig;
+  readonly auth: NanitAuth;
+  /** Started lazily, the first time a camera streams locally. */
+  readonly rtmpRelay: RtmpRelay;
 
-  private readonly accessories: PlatformAccessory[] = [];
-  private readonly cameras: Map<string, NanitCamera> = new Map();
+  /** Both keyed by accessory UUID. */
+  private readonly accessories = new Map<string, PlatformAccessory>();
+  private readonly cameras = new Map<string, NanitCamera>();
+  private readonly timers: NodeJS.Timeout[] = [];
 
-  private accessToken?: string;
-  private refreshToken?: string;
-  private refreshInterval?: NodeJS.Timeout;
-  private discoveryInterval?: NodeJS.Timeout;
-  private rtmpPortCounter = 0;
-  private authFailures = 0;
-  private authDisabled = false;
-
-  constructor(log: Logger, config: PlatformConfig, api: API) {
-    this.log = log;
+  constructor(
+    readonly log: Logger,
+    config: PlatformConfig,
+    readonly api: API,
+  ) {
     this.config = config as NanitPlatformConfig;
-    this.api = api;
+    const store = new TokenStore(path.join(api.user.storagePath(), 'nanit', 'tokens.json'), log);
+    this.auth = new NanitAuth(this.config.email, this.config.refreshToken, store, log);
+    this.rtmpRelay = new RtmpRelay(withPrefix(log, 'RTMP'), this.config.localRtmpPort ?? 1935, this.config.localAddress);
 
-    // Validate config
     if (!this.config.email) {
-      this.log.error('Email is required in config');
+      log.error('"email" is required in the Nanit platform config.');
+      return;
+    }
+    if (!this.auth.hasRefreshToken) {
+      log.error('No Nanit refresh token found. Run "npx nanit-auth" and add "refreshToken" to the Nanit platform config.');
       return;
     }
 
-    // Either password or refreshToken must be provided
-    const hasPassword = !!this.config.password;
-    const hasRefreshToken = !!this.config.refreshToken;
-    
-    if (!hasPassword && !hasRefreshToken) {
-      this.log.error('Either password or refreshToken must be provided in config');
-      this.log.error('Use the nanit-auth CLI to get a refresh token: npx nanit-auth');
-      return;
-    }
-
-    this.log.info('Initializing Nanit platform');
-
-    // Wire shutdown event
-    this.api.on('shutdown', () => this.shutdown());
-
-    // Wait for homebridge to finish loading
-    this.api.on('didFinishLaunching', () => {
-      this.log.debug('Finished launching, starting authentication');
-      this.authenticate().then(() => {
-        this.discoverCameras();
-        this.startRefreshIntervals();
-      }).catch(err => {
-        // Don't let auth failure crash Homebridge — log and degrade gracefully
-        this.log.error('Initial authentication failed — plugin will not function until credentials are fixed.');
-        this.log.error('Run "npx nanit-auth" to get a fresh refresh token, update config, and restart Homebridge.');
-      });
-    });
+    api.on('didFinishLaunching', () => this.start());
+    api.on('shutdown', () => this.shutdown());
   }
 
   configureAccessory(accessory: PlatformAccessory): void {
     this.log.debug('Loading accessory from cache:', accessory.displayName);
-    this.accessories.push(accessory);
+    this.accessories.set(accessory.UUID, accessory);
   }
 
-  async authenticate(): Promise<void> {
-    // Circuit breaker: if auth has failed too many times, stop trying
-    if (this.authDisabled) {
-      this.log.error('Authentication is disabled due to repeated failures. Restart Homebridge after fixing credentials.');
-      throw new Error('Authentication disabled (circuit breaker)');
-    }
-
-    try {
-      const storedRefreshToken = this.loadStoredRefreshToken();
-      const refreshTokenCandidates = [
-        { source: 'stored', token: storedRefreshToken },
-        { source: 'config', token: this.config.refreshToken },
-      ].filter((candidate, index, candidates) =>
-        typeof candidate.token === 'string' &&
-        candidate.token.length > 0 &&
-        candidates.findIndex(other => other.token === candidate.token) === index,
-      ) as Array<{ source: string; token: string }>;
-
-      for (const candidate of refreshTokenCandidates) {
-        this.log.debug(`Found ${candidate.source} refresh token, attempting refresh`);
-        try {
-          await this.refreshAccessToken(candidate.token);
-          this.authFailures = 0; // Reset on success
-          return;
-        } catch (error) {
-          this.log.warn(`${candidate.source} refresh token failed:`, error);
+  private start(): void {
+    void this.sync();
+    this.timers.push(
+      setInterval(() => {
+        if (!this.auth.disabled) {
+          this.auth.refresh().catch((error) => this.log.error(`Token refresh failed: ${errorMessage(error)}`));
         }
-      }
-
-      // SAFETY: Never auto-attempt password login — it triggers MFA SMS.
-      // If refresh token failed or is missing, require manual re-auth via CLI.
-      this.authFailures++;
-      if (this.authFailures >= 3) {
-        this.authDisabled = true;
-        this.log.error(`Authentication failed ${this.authFailures} times — disabling to prevent MFA spam.`);
-        this.log.error('To fix: run "npx nanit-auth" on your Mac to get a fresh refresh token,');
-        this.log.error('then update the refreshToken in Homebridge config and restart.');
-      } else {
-        this.log.error(`Authentication failed (attempt ${this.authFailures}/3).`);
-        this.log.error('Refresh token is invalid or expired. Will NOT attempt password login (would trigger MFA SMS).');
-        this.log.error('To fix: run "npx nanit-auth" to get a fresh refresh token and update config.');
-      }
-      throw new Error('Authentication failed: refresh token invalid, password login disabled for safety');
-    } catch (error) {
-      this.log.error('Authentication failed:', error);
-      throw error;
-    }
+      }, TOKEN_REFRESH_MS),
+      setInterval(() => void this.sync(), (this.config.refreshInterval ?? DEFAULT_DISCOVERY_INTERVAL_S) * 1000),
+    );
   }
 
-  async refreshAccessToken(token?: string): Promise<void> {
-    const refreshToken = token || this.refreshToken;
-    if (!refreshToken) {
-      throw new Error('No refresh token available');
+  /** Authenticate if needed, then reconcile accessories with Nanit's camera list. */
+  private async sync(): Promise<void> {
+    if (this.auth.disabled) {
+      return;
     }
-
-    this.log.debug('Refreshing access token');
-    const abortController = new AbortController();
-    const timeoutId = setTimeout(() => abortController.abort(), 15000);
-    
-    const response = await fetch('https://api.nanit.com/tokens/refresh', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'nanit-api-version': '1',
-      },
-      body: JSON.stringify({ refresh_token: refreshToken }),
-      signal: abortController.signal,
-    }).finally(() => clearTimeout(timeoutId));
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Token refresh failed: ${response.status} ${text}`);
-    }
-
-    const data = await response.json() as NanitAuthResponse;
-    this.accessToken = data.access_token;
-    this.refreshToken = data.refresh_token;
-
-    // Persist the rotated refresh token so it survives restarts
-    if (this.refreshToken) {
-      this.saveStoredRefreshToken(this.refreshToken);
-    }
-
-    this.log.debug('Access token refreshed');
-  }
-
-  /**
-   * Plugin-owned token file in the Homebridge storage directory.
-   * (HAP-NodeJS's internal HAPStorage is not meant for plugins and no longer
-   * supports getItemSync.)
-   */
-  private get tokenStorePath(): string {
-    return path.join(this.api.user.storagePath(), 'nanit', 'tokens.json');
-  }
-
-  private readTokenStore(): Record<string, string> {
     try {
-      const raw = fs.readFileSync(this.tokenStorePath, 'utf8');
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        this.log.warn(`Could not read token store at ${this.tokenStorePath}:`, error);
+      if (!this.auth.authenticated) {
+        await this.auth.refresh();
       }
-      return {};
+      this.reconcile(await getBabies(this.auth.token));
+    } catch (error) {
+      this.log.error(`Failed to sync cameras: ${errorMessage(error)}`);
     }
   }
 
-  private loadStoredRefreshToken(): string | undefined {
-    const token = this.readTokenStore()[this.config.email];
-    return typeof token === 'string' && token.length > 0 ? token : undefined;
-  }
+  private reconcile(babies: NanitBaby[]): void {
+    this.log.debug(`Nanit reports ${babies.length} camera(s)`);
+    const current = new Set(babies.map((baby) => this.upsertCamera(baby)));
 
-  private saveStoredRefreshToken(token: string): void {
-    const file = this.tokenStorePath;
-    try {
-      const store = this.readTokenStore();
-      store[this.config.email] = token;
-      fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-      const tmp = `${file}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
-      fs.renameSync(tmp, file);
-    } catch (error) {
-      // Non-fatal: we still have a valid access token for this session,
-      // but the rotated refresh token won't survive a restart.
-      this.log.error(`Failed to persist refresh token to ${file}:`, error);
+    const stale = [...this.accessories.values()].filter((accessory) => !current.has(accessory.UUID));
+    for (const accessory of stale) {
+      this.log.info('Removing camera:', accessory.displayName);
+      this.cameras.get(accessory.UUID)?.destroy();
+      this.cameras.delete(accessory.UUID);
+      this.accessories.delete(accessory.UUID);
+    }
+    if (stale.length > 0) {
+      this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, stale);
     }
   }
 
-  async discoverCameras(): Promise<void> {
-    try {
-      if (!this.accessToken) {
-        throw new Error('Not authenticated');
-      }
-
-      this.log.info('Discovering cameras');
-      const abortController = new AbortController();
-      const timeoutId = setTimeout(() => abortController.abort(), 15000);
-      
-      const response = await fetch('https://api.nanit.com/babies', {
-        headers: {
-          'Authorization': this.accessToken,
-          'nanit-api-version': '1',
-        },
-        signal: abortController.signal,
-      }).finally(() => clearTimeout(timeoutId));
-
-      if (!response.ok) {
-        throw new Error(`Failed to get babies: ${response.status}`);
-      }
-
-      const data = await response.json() as NanitBabiesResponse;
-      this.log.info(`Found ${data.babies.length} camera(s)`);
-
-      for (const baby of data.babies) {
-        this.addOrUpdateCamera(baby);
-      }
-
-      // Remove cameras that no longer exist
-      const accessoriesToRemove: PlatformAccessory[] = [];
-      for (const accessory of this.accessories) {
-        const exists = data.babies.some(b => b.uid === accessory.context.babyUid);
-        if (!exists) {
-          this.log.info('Removing camera:', accessory.displayName);
-          accessoriesToRemove.push(accessory);
-          this.cameras.delete(accessory.context.babyUid);
-        }
-      }
-      
-      if (accessoriesToRemove.length > 0) {
-        this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, accessoriesToRemove);
-        // Filter removed accessories from the array
-        this.accessories.splice(0, this.accessories.length, 
-          ...this.accessories.filter(acc => !accessoriesToRemove.includes(acc)));
-      }
-    } catch (error) {
-      this.log.error('Failed to discover cameras:', error);
-    }
-  }
-
-  addOrUpdateCamera(baby: NanitBaby): void {
+  /** Returns the accessory UUID. */
+  private upsertCamera(baby: NanitBaby): string {
     const uuid = this.api.hap.uuid.generate(baby.uid);
-    const existingAccessory = this.accessories.find(acc => acc.UUID === uuid);
+    const name = babyName(baby);
+    const camera = this.cameras.get(uuid);
+    camera?.update(baby);
 
-    if (existingAccessory) {
-      // Update existing accessory (including name fix)
-      const correctName = baby.name || baby.first_name || 'Nanit Camera';
-      this.log.info('Updating existing accessory:', correctName);
-      existingAccessory.displayName = correctName;
-      existingAccessory.context.baby = baby;
-      existingAccessory
-        .getService(this.api.hap.Service.AccessoryInformation)
-        ?.setCharacteristic(this.api.hap.Characteristic.Name, correctName);
-      this.api.updatePlatformAccessories([existingAccessory]);
-
-      // Re-create camera handler if not exists
-      if (!this.cameras.has(baby.uid)) {
-        const camera = new NanitCamera(this, existingAccessory, baby);
-        this.cameras.set(baby.uid, camera);
-      } else {
-        const camera = this.cameras.get(baby.uid);
-        if (camera && baby.camera) {
-          camera.updateSensors(baby.camera.temperature, baby.camera.humidity);
-        }
+    const cached = this.accessories.get(uuid);
+    if (cached) {
+      if (cached.displayName !== name) {
+        this.log.info(`Renaming camera "${cached.displayName}" to "${name}"`);
+        cached.displayName = name;
+        cached.getService(this.api.hap.Service.AccessoryInformation)
+          ?.setCharacteristic(this.api.hap.Characteristic.Name, name);
+        this.api.updatePlatformAccessories([cached]);
       }
-    } else {
-      // Create new accessory
-      const name = baby.name || baby.first_name || 'Nanit Camera';
-      this.log.info('Adding new camera:', name);
-
-      const accessory = new this.api.platformAccessory(name, uuid);
-      accessory.context.baby = baby;
-      accessory.context.babyUid = baby.uid;
-
-      const camera = new NanitCamera(this, accessory, baby);
-      this.cameras.set(baby.uid, camera);
-      this.accessories.push(accessory);
-
-      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-    }
-  }
-
-  startRefreshIntervals(): void {
-    // Token refresh every 50 minutes
-    this.refreshInterval = setInterval(() => {
-      if (this.authDisabled) {
-        this.log.warn('Skipping token refresh — auth is disabled (circuit breaker)');
-        return;
+      if (!camera) {
+        this.cameras.set(uuid, new NanitCamera(this, cached, baby));
       }
-      this.log.debug('Auto-refreshing token');
-      this.refreshAccessToken().catch(err => {
-        this.log.error('Auto token refresh failed:', err);
-        this.authFailures++;
-        if (this.authFailures >= 3) {
-          this.authDisabled = true;
-          this.log.error('Too many refresh failures — disabling auth. Fix credentials and restart Homebridge.');
-        }
-      });
-    }, 50 * 60 * 1000);
+      return uuid;
+    }
 
-    // Camera discovery refresh
-    const discoveryInterval = (this.config.refreshInterval || 300) * 1000;
-    this.discoveryInterval = setInterval(() => {
-      this.log.debug('Auto-discovering cameras');
-      this.discoverCameras();
-    }, discoveryInterval);
+    this.log.info('Adding camera:', name);
+    const accessory = new this.api.platformAccessory(name, uuid);
+    this.cameras.set(uuid, new NanitCamera(this, accessory, baby));
+    this.accessories.set(uuid, accessory);
+    this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+    return uuid;
   }
 
-  getAccessToken(): string {
-    if (!this.accessToken) {
-      throw new Error('Not authenticated');
-    }
-    return this.accessToken;
-  }
-
-  allocateRtmpPort(): number {
-    return (this.config.localRtmpPort || 1935) + this.rtmpPortCounter++;
-  }
-
-  // Platform shutdown cleanup
-  shutdown(): void {
-    this.log.info('Shutting down Nanit platform');
-    
-    // Clear intervals
-    if (this.refreshInterval) {
-      clearInterval(this.refreshInterval);
-      this.refreshInterval = undefined;
-    }
-    if (this.discoveryInterval) {
-      clearInterval(this.discoveryInterval);
-      this.discoveryInterval = undefined;
-    }
-    
-    // Cleanup all cameras
+  private shutdown(): void {
+    this.timers.forEach(clearInterval);
     for (const camera of this.cameras.values()) {
-      if ((camera as any).destroy) {
-        (camera as any).destroy();
-      }
+      camera.destroy();
     }
-    
     this.cameras.clear();
-    this.log.info('Nanit platform shutdown complete');
   }
 }

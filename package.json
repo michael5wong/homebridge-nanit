@@ -15,7 +15,7 @@
     "package.json"
   ],
   "scripts": {
-    "build": "tsc && node -e \"for (const f of ['nanit.proto.js', 'nanit.proto.d.ts']) require('fs').copyFileSync('src/' + f, 'dist/' + f)\"",
+    "build": "npm run clean && tsc",
     "watch": "tsc -w",
     "clean": "rm -rf dist",
     "prepare": "npm run build",
@@ -53,7 +53,6 @@
     "@types/node": "^20.11.0",
     "@types/ws": "^8.18.1",
     "homebridge": "^1.8.0",
-    "protobufjs-cli": "^1.2.0",
     "typescript": "^5.3.0"
   }
 }
