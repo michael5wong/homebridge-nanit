@@ -6,6 +6,8 @@ import {
   PlatformConfig,
 } from 'homebridge';
 // Node 18+ has native fetch, no import needed
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   PLATFORM_NAME,
   PLUGIN_NAME,
@@ -85,8 +87,7 @@ export class NanitPlatform implements DynamicPlatformPlugin {
     }
 
     try {
-      const storage = this.api.hap.HAPStorage.storage();
-      const storedRefreshToken = storage.getItemSync(`nanit_refresh_${this.config.email}`);
+      const storedRefreshToken = this.loadStoredRefreshToken();
       const refreshTokenCandidates = [
         { source: 'stored', token: storedRefreshToken },
         { source: 'config', token: this.config.refreshToken },
@@ -156,13 +157,55 @@ export class NanitPlatform implements DynamicPlatformPlugin {
     this.accessToken = data.access_token;
     this.refreshToken = data.refresh_token;
 
-    // Store new refresh token
+    // Persist the rotated refresh token so it survives restarts
     if (this.refreshToken) {
-      const storage = this.api.hap.HAPStorage.storage();
-      storage.setItemSync(`nanit_refresh_${this.config.email}`, this.refreshToken);
+      this.saveStoredRefreshToken(this.refreshToken);
     }
 
     this.log.debug('Access token refreshed');
+  }
+
+  /**
+   * Plugin-owned token file in the Homebridge storage directory.
+   * (HAP-NodeJS's internal HAPStorage is not meant for plugins and no longer
+   * supports getItemSync.)
+   */
+  private get tokenStorePath(): string {
+    return path.join(this.api.user.storagePath(), 'nanit', 'tokens.json');
+  }
+
+  private readTokenStore(): Record<string, string> {
+    try {
+      const raw = fs.readFileSync(this.tokenStorePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.log.warn(`Could not read token store at ${this.tokenStorePath}:`, error);
+      }
+      return {};
+    }
+  }
+
+  private loadStoredRefreshToken(): string | undefined {
+    const token = this.readTokenStore()[this.config.email];
+    return typeof token === 'string' && token.length > 0 ? token : undefined;
+  }
+
+  private saveStoredRefreshToken(token: string): void {
+    const file = this.tokenStorePath;
+    try {
+      const store = this.readTokenStore();
+      store[this.config.email] = token;
+      fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
+      fs.renameSync(tmp, file);
+    } catch (error) {
+      // Non-fatal: we still have a valid access token for this session,
+      // but the rotated refresh token won't survive a restart.
+      this.log.error(`Failed to persist refresh token to ${file}:`, error);
+    }
   }
 
   async discoverCameras(): Promise<void> {
